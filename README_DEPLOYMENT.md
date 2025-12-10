@@ -73,12 +73,42 @@ git clone https://github.com/lazarohernan/sesal_backend.git
 cd sesal_backend
 ```
 
-### 2. Instalar Dependencias
+### 2. Importar Base de Datos
+
+El dump de la base de datos está incluido en el repositorio como `sesal_historico_dump_20251208_210133.sql.gz` (65.58 MB comprimido).
+
+**Descomprimir el dump:**
+```bash
+gunzip sesal_historico_dump_20251208_210133.sql.gz
+```
+
+**Crear la base de datos:**
+```bash
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS sesal_historico CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+```
+
+**Importar los datos (puede tardar varios minutos):**
+```bash
+mysql -u root -p sesal_historico < sesal_historico_dump_20251208_210133.sql
+```
+
+**Verificar la importación:**
+```bash
+mysql -u root -p sesal_historico -e "SHOW TABLES;" | wc -l
+```
+Debe mostrar aproximadamente 64 tablas.
+
+**Opcional: Eliminar el archivo SQL después de importar para liberar espacio:**
+```bash
+rm sesal_historico_dump_20251208_210133.sql
+```
+
+### 3. Instalar Dependencias
 ```bash
 npm install --production
 ```
 
-### 3. Configurar Variables de Entorno
+### 4. Configurar Variables de Entorno
 Copie y edite el archivo `.env`:
 ```bash
 cp .env.example .env
@@ -106,17 +136,17 @@ MYSQL_QUERY_TIMEOUT=300000
 CORS_ORIGINS=https://bi.salud.gob.hn
 ```
 
-### 4. Compilar el Proyecto
+### 5. Compilar el Proyecto
 ```bash
 npm run build
 ```
 
-### 5. Crear Directorio de Logs
+### 6. Crear Directorio de Logs
 ```bash
 mkdir -p logs
 ```
 
-### 6. Configurar PM2
+### 7. Configurar PM2
 Cree el archivo `ecosystem.config.js`:
 ```javascript
 module.exports = {
@@ -144,7 +174,7 @@ module.exports = {
 };
 ```
 
-### 7. Iniciar con PM2
+### 8. Iniciar con PM2
 ```bash
 pm2 start ecosystem.config.js
 pm2 save
