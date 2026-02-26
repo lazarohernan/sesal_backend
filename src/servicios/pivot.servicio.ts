@@ -12,6 +12,7 @@ type JoinKey =
   | "us"
   | "cat_concepto"
   | "cat_concepto_ordenado"
+  | "concepto_ge_codigo"
   | "cat_establecimiento"
   | "cat_region"
   | "deptos"
@@ -115,9 +116,11 @@ export interface PivotCatalogo {
 const JOIN_DEFINITIONS: Record<JoinKey, string> = {
   us: "LEFT JOIN BAS_BDR_US us ON us.C_US = det.C_US",
   cat_concepto:
-    "LEFT JOIN cat_conceptos cat_concepto ON cat_concepto.codigo COLLATE utf8mb4_unicode_ci = det.C_CONCEPTO COLLATE utf8mb4_unicode_ci",
+    "LEFT JOIN cat_conceptos cat_concepto ON (TRIM(cat_concepto.codigo) COLLATE utf8mb4_unicode_ci = TRIM(det.C_CONCEPTO) COLLATE utf8mb4_unicode_ci OR TRIM(LEADING '0' FROM TRIM(cat_concepto.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci)",
   cat_concepto_ordenado:
-    "LEFT JOIN cat_concepto_ordenado cat_concepto_ordenado ON cat_concepto_ordenado.codigo COLLATE utf8mb4_unicode_ci = det.C_CONCEPTO COLLATE utf8mb4_unicode_ci",
+    "LEFT JOIN cat_concepto_ordenado cat_concepto_ordenado ON (TRIM(cat_concepto_ordenado.codigo) COLLATE utf8mb4_unicode_ci = TRIM(det.C_CONCEPTO) COLLATE utf8mb4_unicode_ci OR TRIM(LEADING '0' FROM TRIM(cat_concepto_ordenado.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci)",
+  concepto_ge_codigo:
+    "LEFT JOIN (SELECT TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS codigo_normalizado, MAX(D_CONCEPTO) AS D_CONCEPTO FROM AT2_BDR_CONCEPTOS_GE GROUP BY TRIM(LEADING '0' FROM TRIM(C_CONCEPTO))) concepto_ge_codigo ON concepto_ge_codigo.codigo_normalizado COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci",
   cat_establecimiento:
     "LEFT JOIN cat_establecimientos cat_establecimiento ON cat_establecimiento.codigo COLLATE utf8mb4_unicode_ci = CAST(det.C_US AS CHAR) COLLATE utf8mb4_unicode_ci",
   cat_region:
@@ -176,11 +179,14 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Concepto",
     alias: "concepto",
     type: "string",
-    select: "COALESCE(cat_concepto.descripcion, det.C_CONCEPTO)",
-    groupBy: "COALESCE(cat_concepto.descripcion, det.C_CONCEPTO)",
+    select:
+      "COALESCE(cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
+    groupBy:
+      "COALESCE(cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
     valueExpr: "det.C_CONCEPTO",
-    joins: ["cat_concepto"],
-    orderBy: "COALESCE(cat_concepto.descripcion, det.C_CONCEPTO)",
+    joins: ["cat_concepto", "concepto_ge", "concepto_ge_codigo"],
+    orderBy:
+      "COALESCE(cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
     catalog: {
       table: "cat_conceptos",
       valueColumn: "codigo",
@@ -195,11 +201,14 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Concepto Ordenado",
     alias: "concepto_ordenado",
     type: "string",
-    select: "COALESCE(cat_concepto_ordenado.descripcion, det.C_CONCEPTO)",
-    groupBy: "cat_concepto_ordenado.codigo, cat_concepto_ordenado.descripcion, det.C_CONCEPTO",
+    // Fallback a cat_conceptos y conceptos_ge cuando cat_concepto_ordenado está incompleto.
+    select:
+      "COALESCE(cat_concepto_ordenado.descripcion, cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
+    groupBy:
+      "COALESCE(cat_concepto_ordenado.descripcion, cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)')), cat_concepto_ordenado.codigo, cat_concepto.codigo, det.C_CONCEPTO",
     valueExpr: "det.C_CONCEPTO",
-    joins: ["cat_concepto_ordenado"],
-    orderBy: "LPAD(cat_concepto_ordenado.codigo, 2, '0')",
+    joins: ["cat_concepto_ordenado", "cat_concepto", "concepto_ge", "concepto_ge_codigo"],
+    orderBy: "LPAD(COALESCE(cat_concepto_ordenado.codigo, cat_concepto.codigo, det.C_CONCEPTO), 2, '0')",
     catalog: {
       table: "cat_concepto_ordenado",
       valueColumn: "codigo",
@@ -938,6 +947,25 @@ const obtenerYearsDesdeFiltros = (filtros?: PivotFilter[]): number[] => {
   return valores.map((valor) => Number(valor)).filter((valor) => Number.isFinite(valor));
 };
 
+const limpiarTextoPresentacion = (valor: unknown): unknown => {
+  if (typeof valor !== "string") return valor;
+  const sinControl = valor.replace(/[\r\n\t]/g, " ").replace(/\s+/g, " ").trim();
+  if (!sinControl) return "";
+  return sinControl.replace(/^"(.*)"$/, "$1").trim();
+};
+
+const limpiarFilaSalida = (fila: Record<string, unknown>): Record<string, unknown> => {
+  const limpia: Record<string, unknown> = {};
+  Object.entries(fila).forEach(([key, value]) => {
+    limpia[key] = limpiarTextoPresentacion(value);
+  });
+  return limpia;
+};
+
+const limpiarFilasSalida = (filas: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {
+  return filas.map((fila) => limpiarFilaSalida(fila));
+};
+
 const transformarDatosPivot = (
   datos: Array<Record<string, unknown>>,
   dimensionesFilas: string[],
@@ -995,9 +1023,16 @@ const transformarDatosPivot = (
   // Crear mapa de datos pivotados
   const mapaPivot = new Map<string, Record<string, unknown>>();
   
+  const valorClaveDimension = (fila: Record<string, unknown>, dimension: string): string => {
+    if (dimension === "MUNICIPIO" && fila.MUNICIPIO_CODIGO != null) {
+      return String(fila.MUNICIPIO_CODIGO);
+    }
+    return String(fila[dimension] ?? "");
+  };
+
   datos.forEach(fila => {
     // Crear clave única para la fila basada en dimensiones de fila
-    const claveFila = dimensionesFilas.map(dim => String(fila[dim] ?? '')).join('|');
+    const claveFila = dimensionesFilas.map((dim) => valorClaveDimension(fila, dim)).join('|');
     
     if (!mapaPivot.has(claveFila)) {
       mapaPivot.set(claveFila, {});
@@ -1033,7 +1068,7 @@ const transformarDatosPivot = (
   const clavesVistas = new Set<string>();
   
   datos.forEach(fila => {
-    const claveFila = dimensionesFilas.map(dim => String(fila[dim] ?? '')).join('|');
+    const claveFila = dimensionesFilas.map((dim) => valorClaveDimension(fila, dim)).join('|');
     if (!clavesVistas.has(claveFila)) {
       ordenClaves.push(claveFila);
       clavesVistas.add(claveFila);
@@ -1107,12 +1142,26 @@ async function ejecutarConsultaAgregada(payload: PivotQueryPayload): Promise<Piv
   
   const query = `
     SELECT 
-      COALESCE(cat.descripcion, agg.C_CONCEPTO) AS CONCEPTO,
+      COALESCE(cat.descripcion, ord.descripcion, ge.D_CONCEPTO, CONCAT('Concepto ', agg.C_CONCEPTO, ' (sin catálogo)')) AS CONCEPTO,
       SUM(agg.TOTAL_ATENCIONES) AS \`Total de Atenciones\`
     FROM AGG_INDICADORES_CONCEPTO agg
-    LEFT JOIN cat_conceptos cat ON cat.codigo COLLATE utf8mb4_unicode_ci = agg.C_CONCEPTO COLLATE utf8mb4_unicode_ci
+    LEFT JOIN cat_conceptos cat ON (
+      TRIM(cat.codigo) COLLATE utf8mb4_unicode_ci = TRIM(agg.C_CONCEPTO) COLLATE utf8mb4_unicode_ci
+      OR TRIM(LEADING '0' FROM TRIM(cat.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(agg.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci
+    )
+    LEFT JOIN cat_concepto_ordenado ord ON (
+      TRIM(ord.codigo) COLLATE utf8mb4_unicode_ci = TRIM(agg.C_CONCEPTO) COLLATE utf8mb4_unicode_ci
+      OR TRIM(LEADING '0' FROM TRIM(ord.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(agg.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci
+    )
+    LEFT JOIN (
+      SELECT
+        TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS codigo_normalizado,
+        MAX(D_CONCEPTO) AS D_CONCEPTO
+      FROM AT2_BDR_CONCEPTOS_GE
+      GROUP BY TRIM(LEADING '0' FROM TRIM(C_CONCEPTO))
+    ) ge ON ge.codigo_normalizado COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(agg.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci
     ${whereClause.replace('C_REGION', 'agg.C_REGION').replace('N_ANIO', 'agg.N_ANIO')}
-    GROUP BY cat.descripcion, agg.C_CONCEPTO
+    GROUP BY COALESCE(cat.descripcion, ord.descripcion, ge.D_CONCEPTO, CONCAT('Concepto ', agg.C_CONCEPTO, ' (sin catálogo)')), agg.C_CONCEPTO
     ORDER BY SUM(agg.TOTAL_ATENCIONES) DESC
     LIMIT ?
   `;
@@ -1120,14 +1169,23 @@ async function ejecutarConsultaAgregada(payload: PivotQueryPayload): Promise<Piv
   params.push(limite);
   
   const pool = tomarPool();
-  const [rows] = await pool.query<RowDataPacket[]>(query, params);
-  const datos = rows as any[];
+  let datos: any[] = [];
+  try {
+    const [rows] = await pool.query<RowDataPacket[]>(query, params);
+    datos = rows as any[];
+  } catch (error: any) {
+    // En algunos entornos la tabla AGG_* no existe; degradar al flujo normal sin romper la API.
+    if (error?.code === "ER_NO_SUCH_TABLE") {
+      return null;
+    }
+    throw error;
+  }
   
   // Calcular total general
   const totalGeneral = datos.reduce((sum: number, row: any) => sum + (row['Total de Atenciones'] || 0), 0);
   
   return {
-    datos,
+    datos: limpiarFilasSalida(datos),
     metadata: {
       dimensionesSeleccionadas: ['CONCEPTO'],
       dimensionesFilas: ['CONCEPTO'],
@@ -1179,8 +1237,14 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
   const valoresSolicitud = payload.values ?? [];
   const limite = payload.limit ?? 1000;
   const dimensionesSolicitadas = [...filas, ...columnas];
+  const incluirClaveMunicipio = dimensionesSolicitadas.includes("MUNICIPIO");
 
   const { selects, groupBy, joins, orderBy } = construirSelectDimensiones(dimensionesSolicitadas);
+  if (incluirClaveMunicipio) {
+    // Clave estable para evitar colisiones de municipios con el mismo nombre en departamentos distintos.
+    selects.push("CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo");
+    joins.add("us");
+  }
   if (!selects.length && !valoresSolicitud.length) {
     return {
       datos: [],
@@ -1314,6 +1378,11 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
         delete objeto[medida.alias];
       }
     });
+
+    if (incluirClaveMunicipio && objeto.municipio_codigo !== undefined) {
+      objeto.MUNICIPIO_CODIGO = objeto.municipio_codigo;
+      delete objeto.municipio_codigo;
+    }
     
     return objeto;
   });
@@ -1359,8 +1428,8 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
     : totalGeneral;
 
   const resultado: PivotQueryResult = {
-    datos: datosTransformados,
-    totalGeneral: totalGeneralFinal,
+    datos: limpiarFilasSalida(datosTransformados),
+    totalGeneral: totalGeneralFinal ? limpiarFilaSalida(totalGeneralFinal) : null,
     aniosConsultados: aniosConsulta,
     metadata: {
       dimensionesSeleccionadas: dimensionesSolicitadas,
