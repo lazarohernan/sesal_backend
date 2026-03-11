@@ -9,13 +9,20 @@ const init = async () => {
   await configuracionBDServicio.cargarConfiguracionPersistida();
   await inicializarPool();
   const app = await buildApp();
+  proxy = awsLambdaFastify(app, { callbackWaitsForEmptyEventLoop: false });
   await app.ready();
-  proxy = awsLambdaFastify(app);
 };
 
 const initPromise = init();
 
-export const handler = async (event: any, context: any, callback: any) => {
+export const handler = async (event: any, context: any) => {
+  context.callbackWaitsForEmptyEventLoop = false;
   await initPromise;
-  return proxy(event, context, callback);
+  const result = await new Promise((resolve, reject) => {
+    proxy(event, context, (err: any, res: any) => {
+      if (err) reject(err);
+      else resolve(res);
+    });
+  });
+  return result;
 };
