@@ -20,18 +20,17 @@ const pivotRutas: FastifyPluginAsync = async (fastify) => {
   fastify.addHook("onRequest", logConfiguracionBD);
   fastify.addHook("preHandler", requerirConfiguracionBD);
 
-  // Rate limiting para consultas pivot (max 10 consultas por minuto por IP)
-  // Con 16GB RAM y 50 conexiones, podemos ser mas permisivos
+  // Rate limiting para consultas pivot (max 60 consultas por minuto por IP)
   const pivotRateLimit = simpleRateLimit({
     windowMs: 60_000,
-    max: 10,
+    max: 60,
     keyGenerator: (req) => `pivot:${req.ip || "unknown"}`
   });
 
-  // Rate limiting mas permisivo para catalogos (max 60 por minuto)
+  // Rate limiting para catalogos (max 120 por minuto)
   const catalogoRateLimit = simpleRateLimit({
     windowMs: 60_000,
-    max: 60,
+    max: 120,
     keyGenerator: (req) => `catalogo:${req.ip || "unknown"}`
   });
 

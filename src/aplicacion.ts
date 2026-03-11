@@ -31,7 +31,7 @@ export const buildApp = async () => {
 
   // --- Hooks ---
   app.addHook("onRequest", requestIdHook);
-  app.addHook("onRequest", simpleRateLimit({ windowMs: 60_000, max: 300 }));
+  app.addHook("onRequest", simpleRateLimit({ windowMs: 60_000, max: 1000 }));
 
   // --- Health endpoint ---
   app.get("/salud", async (request, reply) => {
