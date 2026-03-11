@@ -177,14 +177,14 @@ export const CACHE_TTL = {
   // Valores de dimensiones dinámicas como establecimientos (5 minutos)
   DIMENSION_DINAMICA: 5 * 60 * 1000,
   
-  // Resultados de consultas pivot (2 minutos)
-  CONSULTA_PIVOT: 2 * 60 * 1000,
-  
-  // Resumen del tablero (5 minutos)
-  RESUMEN_TABLERO: 5 * 60 * 1000,
-  
-  // Datos del mapa (10 minutos)
-  DATOS_MAPA: 10 * 60 * 1000
+  // Resultados de consultas pivot (60 minutos - los datos históricos no cambian frecuentemente)
+  CONSULTA_PIVOT: 60 * 60 * 1000,
+
+  // Resumen del tablero (60 minutos)
+  RESUMEN_TABLERO: 60 * 60 * 1000,
+
+  // Datos del mapa (60 minutos)
+  DATOS_MAPA: 60 * 60 * 1000
 } as const;
 
 // Claves de caché predefinidas

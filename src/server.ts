@@ -23,6 +23,28 @@ const iniciar = async () => {
   try {
     await app.listen({ port: puerto, host: "0.0.0.0" });
     logger.info(`Servidor BI SESAL escuchando en puerto ${puerto}`);
+
+    // Pre-calentar caché con las consultas más pesadas (en background, no bloquea)
+    setTimeout(async () => {
+      try {
+        logger.info("Pre-calentando caché con consultas frecuentes...");
+        const base = `http://127.0.0.1:${puerto}`;
+        const consultas = [
+          fetch(`${base}/api/tablero/anios`),
+          fetch(`${base}/api/tablero/resumen`),
+          fetch(`${base}/api/pivot/catalogo`),
+          fetch(`${base}/api/pivot/consulta`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filters: [], rows: ["CONCEPTO_ORDENADO"], values: [{ field: "TOTAL", aggregation: "SUM" }], limit: 100, includeTotals: true })
+          })
+        ];
+        await Promise.allSettled(consultas);
+        logger.info("Caché pre-calentado exitosamente");
+      } catch (e) {
+        logger.warn("Error pre-calentando caché:", e instanceof Error ? e.message : "desconocido");
+      }
+    }, 3000);
   } catch (error) {
     logger.error("Error al iniciar el servidor", error);
     process.exit(1);
