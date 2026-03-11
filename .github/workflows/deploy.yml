@@ -1,0 +1,40 @@
+name: Deploy Backend to Lambda
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      LAMBDA_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Package Lambda
+        run: |
+          mkdir -p lambda-package
+          cp -r dist/* lambda-package/
+          cp package.json package-lock.json lambda-package/
+          cd lambda-package
+          npm ci --omit=dev
+          zip -r ../deploy.zip .
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy to Lambda
+        run: aws lambda update-function-code --function-name "$LAMBDA_NAME" --zip-file fileb://deploy.zip
