@@ -20,17 +20,18 @@ const pivotRutas: FastifyPluginAsync = async (fastify) => {
   fastify.addHook("onRequest", logConfiguracionBD);
   fastify.addHook("preHandler", requerirConfiguracionBD);
 
-  // Rate limiting para consultas pivot (max 60 consultas por minuto por IP)
+  // Rate limiting para consultas pivot (max 300 por minuto por IP)
+  // Alto porque CloudFront comparte IPs entre usuarios
   const pivotRateLimit = simpleRateLimit({
     windowMs: 60_000,
-    max: 60,
+    max: 300,
     keyGenerator: (req) => `pivot:${req.ip || "unknown"}`
   });
 
-  // Rate limiting para catalogos (max 120 por minuto)
+  // Rate limiting para catalogos (max 600 por minuto)
   const catalogoRateLimit = simpleRateLimit({
     windowMs: 60_000,
-    max: 120,
+    max: 600,
     keyGenerator: (req) => `catalogo:${req.ip || "unknown"}`
   });
 
