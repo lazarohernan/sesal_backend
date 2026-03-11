@@ -1,1 +1,0 @@
-export { entorno } from "./entorno";
