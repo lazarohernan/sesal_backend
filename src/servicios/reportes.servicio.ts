@@ -38,38 +38,32 @@ export const obtenerIndicadoresMunicipales = async (
       const parametros: any[] = [departamentoId];
 
       if (regionId !== undefined && regionId !== null) {
-        condicionRegion = "AND us.C_REGION = ?";
+        condicionRegion = "AND C_REGION = ?";
         parametros.push(regionId);
       } else {
         const esCortes = departamentoId === 5;
         if (esCortes) {
-          condicionRegion = "AND us.C_REGION IN (5, 20)";
+          condicionRegion = "AND C_REGION IN (5, 20)";
         }
       }
 
       const query = `
         SELECT
-          SUM(totalConsultas) AS totalConsultas,
-          SUM(enfermeraAuxiliar) AS enfermeraAuxiliar,
-          SUM(enfermeraProfesional) AS enfermeraProfesional,
-          SUM(medicinaGeneral) AS medicinaGeneral,
-          SUM(medicosEspecialistas) AS medicosEspecialistas,
-          COUNT(DISTINCT C_US) AS totalUnidades
+          COALESCE(SUM(det.Q_AT_ENFERMERA_AUX + det.Q_AT_ENFERMERA_PRO + det.Q_AT_MEDICO_GEN + det.Q_AT_MEDICO_ESP), 0) AS totalConsultas,
+          COALESCE(SUM(det.Q_AT_ENFERMERA_AUX), 0) AS enfermeraAuxiliar,
+          COALESCE(SUM(det.Q_AT_ENFERMERA_PRO), 0) AS enfermeraProfesional,
+          COALESCE(SUM(det.Q_AT_MEDICO_GEN), 0) AS medicinaGeneral,
+          COALESCE(SUM(det.Q_AT_MEDICO_ESP), 0) AS medicosEspecialistas,
+          COUNT(DISTINCT det.C_US) AS totalUnidades
         FROM (
-          SELECT
-            det.C_US,
-            det.Q_AT_ENFERMERA_AUX + det.Q_AT_ENFERMERA_PRO + det.Q_AT_MEDICO_GEN + det.Q_AT_MEDICO_ESP AS totalConsultas,
-            det.Q_AT_ENFERMERA_AUX AS enfermeraAuxiliar,
-            det.Q_AT_ENFERMERA_PRO AS enfermeraProfesional,
-            det.Q_AT_MEDICO_GEN AS medicinaGeneral,
-            det.Q_AT_MEDICO_ESP AS medicosEspecialistas
-          FROM ${TABLA_DETALLE} det
-          INNER JOIN BAS_BDR_US us
-          ON us.C_US = det.C_US
-            AND us.C_DEPARTAMENTO = ?
-            ${condicionRegion}
-          WHERE det.N_ANIO = ?
-        ) AS subquery`;
+          SELECT DISTINCT CAST(C_US AS CHAR) AS C_US
+          FROM BAS_BDR_US
+          WHERE C_DEPARTAMENTO = ?
+          ${condicionRegion}
+        ) us
+        STRAIGHT_JOIN ${TABLA_DETALLE} det
+          ON det.C_US = us.C_US
+        WHERE det.N_ANIO = ?`;
 
       parametros.push(anio);
       const [filas] = await pool.query<RowDataPacket[]>(query, parametros);
@@ -89,14 +83,14 @@ export const obtenerIndicadoresMunicipales = async (
 };
 
 export const obtenerEstadisticasCache = () => {
-  const stats = cache.getStats();
-  const reportesKeys = stats.keys.filter(k => k.startsWith("reportes:"));
+  const stats = cache.getStats({ includeKeys: false });
   return {
-    totalEntradas: reportesKeys.length,
+    totalEntradas: cache.countKeysByPrefix("reportes:"),
     cacheGlobal: {
       hits: stats.hits,
       misses: stats.misses,
-      totalSize: stats.size
+      totalSize: stats.size,
+      pending: stats.pending
     }
   };
 };

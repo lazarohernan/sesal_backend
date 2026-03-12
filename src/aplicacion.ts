@@ -8,6 +8,9 @@ import { entorno } from "./configuracion";
 import { registrarRutas } from "./rutas/index.routes";
 import { errorHandler, notFoundHandler, requestIdHook } from "./utilidades/error.utilidad";
 import { simpleRateLimit } from "./utilidades/rate-limit.utilidad";
+import { logger } from "./utilidades/registro.utilidad";
+
+const normalizarOrigen = (origen: string) => origen.trim().replace(/\/$/, "").toLowerCase();
 
 export const buildApp = async () => {
   const app = Fastify({
@@ -24,7 +27,24 @@ export const buildApp = async () => {
   });
 
   await app.register(fastifyCors, {
-    origin: true
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      const origenesPermitidos = entorno.cors.origenes;
+      if (origenesPermitidos.length === 0) {
+        callback(null, true);
+        return;
+      }
+
+      const permitido = origenesPermitidos
+        .map(normalizarOrigen)
+        .includes(normalizarOrigen(origin));
+
+      callback(null, permitido);
+    }
   });
 
   await app.register(fastifyCompress);
@@ -44,6 +64,10 @@ export const buildApp = async () => {
 
   // --- API routes ---
   await app.register(registrarRutas, { prefix: "/api" });
+
+  if (entorno.esProduccion && entorno.cors.origenes.length === 0) {
+    logger.warn("CORS_ORIGINS no esta configurado en produccion. Se permiten origenes dinamicos.");
+  }
 
   // --- Error handling ---
   app.setNotFoundHandler(notFoundHandler);

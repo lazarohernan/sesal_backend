@@ -1,11 +1,10 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
-import type { RowDataPacket } from "mysql2";
 
 import {
   obtenerDatosMapaHonduras,
   obtenerResumenTablero
 } from "../servicios/tablero.servicio";
-import { obtenerPoolActual } from "../base_datos/pool";
+import { obtenerAniosDisponibles } from "../servicios/pivot.servicio";
 import { logger } from "../utilidades/registro.utilidad";
 
 export const obtenerResumenControlador = async (
@@ -58,14 +57,7 @@ export const obtenerAniosDisponiblesControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    const pool = obtenerPoolActual();
-    const [filas] = await pool.query<RowDataPacket[]>(
-      `SELECT DISTINCT N_ANIO AS anio FROM AT2_DETALLE ORDER BY N_ANIO DESC`
-    );
-
-    const anios = filas
-      .map(fila => Number(fila.anio))
-      .filter((anio): anio is number => Number.isFinite(anio));
+    const anios = await obtenerAniosDisponibles();
 
     return reply.status(200).send({
       datos: anios,

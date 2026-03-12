@@ -1,7 +1,10 @@
 import type { FastifyPluginAsync } from "fastify";
 import { testDatabaseConnection, getDatabaseInfo, saveDatabaseConfig, getSavedDatabaseConfig, deleteDatabaseConfig } from "../controladores/configuracion.controlador";
+import { requireAdminAccess } from "../middleware/admin.middleware";
 
 const configuracionRutas: FastifyPluginAsync = async (fastify) => {
+  fastify.addHook("onRequest", requireAdminAccess);
+
   // Ruta para probar conexion a base de datos
   fastify.post("/test-db-connection", testDatabaseConnection);
 

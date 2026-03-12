@@ -3,16 +3,35 @@ import { pool } from "../base_datos/pool";
 import { obtenerEstadisticasQueries } from "../utilidades/query-logging.utilidad";
 import { entorno } from "../configuracion/entorno";
 import { cache } from "../utilidades/cache.utilidad";
+import { requireAdminAccess } from "../middleware/admin.middleware";
+
+let ultimoEstadoDB:
+  | {
+      expiresAt: number;
+      statusCode: number;
+      body: Record<string, unknown>;
+    }
+  | null = null;
 
 const healthRutas: FastifyPluginAsync = async (fastify) => {
   // Endpoint para verificar el estado de la conexion a la base de datos
   fastify.get("/db", async (_request, reply) => {
+    if (ultimoEstadoDB && ultimoEstadoDB.expiresAt > Date.now()) {
+      return reply.status(ultimoEstadoDB.statusCode).send(ultimoEstadoDB.body);
+    }
+
     try {
       if (!pool) {
-        return reply.status(503).send({
+        const body = {
           connected: false,
           error: "Pool de conexiones no inicializado"
-        });
+        };
+        ultimoEstadoDB = {
+          expiresAt: Date.now() + 5_000,
+          statusCode: 503,
+          body
+        };
+        return reply.status(503).send(body);
       }
 
       // Hacer una consulta simple para verificar la conexion
@@ -20,21 +39,33 @@ const healthRutas: FastifyPluginAsync = async (fastify) => {
       await connection.ping();
       connection.release();
 
-      return reply.send({
+      const body = {
         connected: true,
         message: "Conexion a base de datos exitosa"
-      });
+      };
+      ultimoEstadoDB = {
+        expiresAt: Date.now() + 5_000,
+        statusCode: 200,
+        body
+      };
+      return reply.send(body);
     } catch (error) {
       console.error("Error al verificar conexion a BD:", error);
-      return reply.status(503).send({
+      const body = {
         connected: false,
         error: error instanceof Error ? error.message : "Error desconocido"
-      });
+      };
+      ultimoEstadoDB = {
+        expiresAt: Date.now() + 5_000,
+        statusCode: 503,
+        body
+      };
+      return reply.status(503).send(body);
     }
   });
 
   // Endpoint de monitoreo con metricas del sistema
-  fastify.get("/metrics", async (_request, reply) => {
+  fastify.get("/metrics", { preHandler: requireAdminAccess }, async (_request, reply) => {
     try {
       const stats = obtenerEstadisticasQueries();
       const memUsage = process.memoryUsage();
@@ -75,7 +106,7 @@ const healthRutas: FastifyPluginAsync = async (fastify) => {
           }))
         },
         cache: {
-          ...cache.getStats(),
+          ...cache.getStats({ maxKeys: 50 }),
           hitRatio: (cache.getHitRatio() * 100).toFixed(2) + "%"
         }
       });
@@ -87,9 +118,9 @@ const healthRutas: FastifyPluginAsync = async (fastify) => {
   });
 
   // Endpoint para limpiar el cache (util despues de actualizaciones de datos)
-  fastify.post("/cache/clear", async (_request, reply) => {
+  fastify.post("/cache/clear", { preHandler: requireAdminAccess }, async (_request, reply) => {
     try {
-      const statsBefore = cache.getStats();
+      const statsBefore = cache.getStats({ includeKeys: false });
       cache.clear();
 
       return reply.send({
@@ -106,9 +137,9 @@ const healthRutas: FastifyPluginAsync = async (fastify) => {
   });
 
   // Endpoint para ver el estado del cache
-  fastify.get("/cache", async (_request, reply) => {
+  fastify.get("/cache", { preHandler: requireAdminAccess }, async (_request, reply) => {
     try {
-      const stats = cache.getStats();
+      const stats = cache.getStats({ maxKeys: 50 });
 
       return reply.send({
         ...stats,

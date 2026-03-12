@@ -8,16 +8,12 @@ import {
   mesesOcupadosControlador
 } from "../controladores/pivot.controlador";
 import {
-  establecerConfiguracionBD,
-  logConfiguracionBD,
   requerirConfiguracionBD
 } from "../middleware/configuracion-bd.middleware";
+import { requireAdminAccess } from "../middleware/admin.middleware";
 import { simpleRateLimit } from "../utilidades/rate-limit.utilidad";
 
 const pivotRutas: FastifyPluginAsync = async (fastify) => {
-  // Register hooks for all routes in this plugin
-  fastify.addHook("onRequest", establecerConfiguracionBD);
-  fastify.addHook("onRequest", logConfiguracionBD);
   fastify.addHook("preHandler", requerirConfiguracionBD);
 
   // Rate limiting para consultas pivot (max 300 por minuto por IP)
@@ -40,7 +36,7 @@ const pivotRutas: FastifyPluginAsync = async (fastify) => {
   fastify.get("/meses-ocupados", { preHandler: catalogoRateLimit }, mesesOcupadosControlador);
   fastify.get("/dimensiones/:dimensionId/valores", { preHandler: catalogoRateLimit }, valoresDimensionPivotControlador);
   fastify.post("/consulta", { preHandler: pivotRateLimit }, ejecutarPivotControlador);
-  fastify.get("/cache/stats", estadisticasCacheControlador);
+  fastify.get("/cache/stats", { preHandler: requireAdminAccess }, estadisticasCacheControlador);
 };
 
 export default pivotRutas;

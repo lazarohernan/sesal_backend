@@ -1,14 +1,24 @@
-name: Deploy Backend to Lambda
+name: Deploy Backend to EC2
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: backend-ec2-deploy
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      LAMBDA_NAME: ${{ secrets.LAMBDA_FUNCTION_NAME }}
+      APP_DIR: ${{ secrets.EC2_DEPLOY_PATH }}
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_SSH_PORT: ${{ secrets.EC2_SSH_PORT }}
+      SYSTEMD_SERVICE: ${{ secrets.EC2_SYSTEMD_SERVICE }}
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -16,25 +26,77 @@ jobs:
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: package-lock.json
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - run: npm run build
+      - name: Build backend
+        run: npm run build
 
-      - name: Package Lambda
+      - name: Package release
         run: |
-          mkdir -p lambda-package
-          cp -r dist/* lambda-package/
-          cp package.json package-lock.json lambda-package/
-          cd lambda-package
+          mkdir -p release
+          cp -r dist release/dist
+          cp package.json release/package.json
+          cp package-lock.json release/package-lock.json
+          tar -czf backend-release.tar.gz -C release .
+
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.EC2_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload release
+        run: |
+          set -euo pipefail
+          scp -P "${EC2_SSH_PORT:-22}" backend-release.tar.gz "${EC2_USER}@${EC2_HOST}:/tmp/backend-release.tar.gz"
+
+      - name: Deploy on EC2
+        run: |
+          set -euo pipefail
+          ssh -p "${EC2_SSH_PORT:-22}" "${EC2_USER}@${EC2_HOST}" "APP_DIR='${APP_DIR}' SYSTEMD_SERVICE='${SYSTEMD_SERVICE}' ADMIN_TOKEN='${ADMIN_TOKEN}' bash -s" <<'EOF'
+          set -euo pipefail
+
+          if [ -z "${APP_DIR:-}" ]; then
+            echo "EC2_DEPLOY_PATH no configurado"
+            exit 1
+          fi
+
+          if [ -z "${SYSTEMD_SERVICE:-}" ]; then
+            echo "EC2_SYSTEMD_SERVICE no configurado"
+            exit 1
+          fi
+
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_DIR"' EXIT
+
+          tar -xzf /tmp/backend-release.tar.gz -C "$TMP_DIR"
+          rm -f /tmp/backend-release.tar.gz
+
+          cd "$TMP_DIR"
           npm ci --omit=dev
-          zip -r ../deploy.zip .
 
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          mkdir -p "$APP_DIR"
+          find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -r dist "$APP_DIR/dist"
+          cp package.json "$APP_DIR/package.json"
+          cp package-lock.json "$APP_DIR/package-lock.json"
 
-      - name: Deploy to Lambda
-        run: aws lambda update-function-code --function-name "$LAMBDA_NAME" --zip-file fileb://deploy.zip
+          if [ -n "${ADMIN_TOKEN:-}" ]; then
+            OVERRIDE_DIR="/etc/systemd/system/${SYSTEMD_SERVICE}.d"
+            sudo mkdir -p "$OVERRIDE_DIR"
+            printf '[Service]\nEnvironment=ADMIN_TOKEN=%s\n' "$ADMIN_TOKEN" | sudo tee "$OVERRIDE_DIR/admin-token.conf" >/dev/null
+            sudo chmod 600 "$OVERRIDE_DIR/admin-token.conf"
+          fi
+
+          sudo systemctl daemon-reload
+          sudo systemctl restart "$SYSTEMD_SERVICE"
+          sudo systemctl is-active "$SYSTEMD_SERVICE"
+          curl -fsS http://127.0.0.1:4000/salud >/dev/null
+          EOF

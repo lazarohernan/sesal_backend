@@ -14,16 +14,19 @@ interface CacheStats {
   misses: number;
   size: number;
   keys: string[];
+  pending: number;
 }
 
 class MemoryCache {
   private cache: Map<string, CacheEntry<unknown>> = new Map();
+  private pending = new Map<string, Promise<unknown>>();
   private stats = { hits: 0, misses: 0 };
   private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor() {
     // Limpiar entradas expiradas cada 5 minutos
     this.cleanupInterval = setInterval(() => this.cleanup(), 5 * 60 * 1000);
+    this.cleanupInterval.unref();
   }
 
   /**
@@ -80,15 +83,30 @@ class MemoryCache {
       return cached;
     }
 
-    const data = await generator();
-    this.set(key, data, ttlMs);
-    return data;
+    const pending = this.pending.get(key) as Promise<T> | undefined;
+    if (pending) {
+      this.stats.hits++;
+      return pending;
+    }
+
+    const promise = generator()
+      .then((data) => {
+        this.set(key, data, ttlMs);
+        return data;
+      })
+      .finally(() => {
+        this.pending.delete(key);
+      });
+
+    this.pending.set(key, promise);
+    return promise;
   }
 
   /**
    * Elimina una entrada del caché
    */
   delete(key: string): boolean {
+    this.pending.delete(key);
     return this.cache.delete(key);
   }
 
@@ -101,6 +119,7 @@ class MemoryCache {
     for (const key of this.cache.keys()) {
       if (key.startsWith(pattern)) {
         this.cache.delete(key);
+        this.pending.delete(key);
         deleted++;
       }
     }
@@ -112,6 +131,7 @@ class MemoryCache {
    */
   clear(): void {
     this.cache.clear();
+    this.pending.clear();
     this.stats = { hits: 0, misses: 0 };
   }
 
@@ -130,13 +150,27 @@ class MemoryCache {
   /**
    * Obtiene estadísticas del caché
    */
-  getStats(): CacheStats {
+  getStats(options?: { includeKeys?: boolean; maxKeys?: number }): CacheStats {
+    const includeKeys = options?.includeKeys ?? true;
+    const maxKeys = Math.max(0, options?.maxKeys ?? 100);
+
     return {
       hits: this.stats.hits,
       misses: this.stats.misses,
       size: this.cache.size,
-      keys: Array.from(this.cache.keys())
+      keys: includeKeys ? Array.from(this.cache.keys()).slice(0, maxKeys) : [],
+      pending: this.pending.size
     };
+  }
+
+  countKeysByPrefix(prefix: string): number {
+    let total = 0;
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(prefix)) {
+        total++;
+      }
+    }
+    return total;
   }
 
   /**
@@ -193,6 +227,7 @@ export const CACHE_KEYS = {
   ANIOS_DISPONIBLES: "pivot:anios",
   PERIODOS_DISPONIBLES: "pivot:periodos",
   TABLAS_DETALLE: "pivot:tablas_detalle",
+  MESES_OCUPADOS: (anio: number) => `pivot:meses:${anio}`,
   DIMENSION_VALORES: (dimensionId: string, filtros?: string) => 
     `pivot:dimension:${dimensionId}${filtros ? `:${filtros}` : ""}`,
   RESUMEN_TABLERO: (anio?: number) => 

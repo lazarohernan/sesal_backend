@@ -5,6 +5,56 @@ import { inicializarPool, pool } from "./base_datos/pool";
 import { configuracionBDServicio } from "./servicios/configuracion-bd.servicio";
 
 const puerto = entorno.puerto;
+const DEFAULT_PREWARM_YEARS = [2025, 2024, 2023, 2022];
+
+const construirAniosPrecalentamiento = () => {
+  if (entorno.cache.precalentarAnios.length > 0) {
+    return Array.from(new Set(entorno.cache.precalentarAnios));
+  }
+
+  return DEFAULT_PREWARM_YEARS;
+};
+
+const precalentarCache = async () => {
+  const base = `http://127.0.0.1:${puerto}`;
+  const signal = AbortSignal.timeout(15_000);
+
+  logger.info("Pre-calentando caché...");
+
+  await Promise.allSettled([
+    fetch(`${base}/api/tablero/anios`, { signal }),
+    fetch(`${base}/api/tablero/resumen`, { signal }),
+    fetch(`${base}/api/pivot/catalogo`, { signal })
+  ]);
+  logger.info("Caché fase 1 listo (catálogos)");
+
+  const anios = construirAniosPrecalentamiento();
+  const concurrencia = entorno.cache.precalentarConcurrencia;
+
+  for (let i = 0; i < anios.length; i += concurrencia) {
+    const batch = anios.slice(i, i + concurrencia);
+    const consultas = batch.map((anio) =>
+      fetch(`${base}/api/pivot/consulta`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(30_000),
+        body: JSON.stringify({
+          filters: [],
+          rows: ["CONCEPTO_ORDENADO"],
+          values: [{ field: "TOTAL", aggregation: "SUM" }],
+          years: [anio],
+          limit: 100,
+          includeTotals: true
+        })
+      })
+    );
+
+    await Promise.allSettled(consultas);
+    logger.info(`Caché pre-calentado: años ${batch.join(", ")}`);
+  }
+
+  logger.info(`Caché pre-calentado exitosamente (${anios.length} años)`);
+};
 
 const iniciar = async () => {
   try {
@@ -24,40 +74,15 @@ const iniciar = async () => {
     await app.listen({ port: puerto, host: "0.0.0.0" });
     logger.info(`Servidor BI SESAL escuchando en puerto ${puerto}`);
 
-    // Pre-calentar caché con todas las consultas por año (en background, no bloquea)
-    setTimeout(async () => {
-      try {
-        logger.info("Pre-calentando caché...");
-        const base = `http://127.0.0.1:${puerto}`;
-
-        // Fase 1: endpoints ligeros
-        await Promise.allSettled([
-          fetch(`${base}/api/tablero/anios`),
-          fetch(`${base}/api/tablero/resumen`),
-          fetch(`${base}/api/pivot/catalogo`)
-        ]);
-        logger.info("Caché fase 1 listo (catálogos)");
-
-        // Fase 2: consulta CONCEPTO_ORDENADO para cada año (de 2 en 2 para no saturar RDS)
-        const anios = [2025, 2024, 2023, 2022, 2021, 2020, 2019, 2018, 2017, 2016, 2015, 2014, 2013, 2012, 2011, 2010, 2009, 2008];
-        for (let i = 0; i < anios.length; i += 2) {
-          const batch = anios.slice(i, i + 2);
-          const consultas = batch.map(anio =>
-            fetch(`${base}/api/pivot/consulta`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ filters: [], rows: ["CONCEPTO_ORDENADO"], values: [{ field: "TOTAL", aggregation: "SUM" }], years: [anio], limit: 100, includeTotals: true })
-            })
-          );
-          await Promise.allSettled(consultas);
-          logger.info(`Caché pre-calentado: años ${batch.join(", ")}`);
-        }
-
-        logger.info("Caché pre-calentado exitosamente (18 años)");
-      } catch (e) {
-        logger.warn("Error pre-calentando caché:", e instanceof Error ? e.message : "desconocido");
-      }
-    }, 3000);
+    if (entorno.cache.precalentar) {
+      setTimeout(() => {
+        void precalentarCache().catch((e) => {
+          logger.warn("Error pre-calentando caché:", e instanceof Error ? e.message : "desconocido");
+        });
+      }, entorno.cache.precalentarDelayMs);
+    } else {
+      logger.info("Pre-calentamiento de caché deshabilitado");
+    }
   } catch (error) {
     logger.error("Error al iniciar el servidor", error);
     process.exit(1);
