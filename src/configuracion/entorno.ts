@@ -63,5 +63,11 @@ export const entorno = {
     precalentarDelayMs: numero(process.env.CACHE_PREWARM_DELAY_MS, 3000),
     precalentarConcurrencia: Math.max(1, numero(process.env.CACHE_PREWARM_CONCURRENCY, 1)),
     precalentarAnios: aniosPrecalentamiento
+  },
+  trabajos: {
+    pivotConcurrencia: Math.max(1, numero(process.env.PIVOT_JOB_CONCURRENCY, 1)),
+    pivotMaxEnCola: Math.max(1, numero(process.env.PIVOT_JOB_MAX_QUEUE, 100)),
+    pivotPollMs: Math.max(1000, numero(process.env.PIVOT_JOB_POLL_MS, 3000)),
+    pivotResultadoTtlMs: Math.max(60_000, numero(process.env.PIVOT_JOB_TTL_MS, 6 * 60 * 60 * 1000))
   }
 };

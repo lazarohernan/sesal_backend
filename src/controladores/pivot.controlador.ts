@@ -7,6 +7,7 @@ import {
   obtenerValoresDimension,
   type PivotQueryPayload
 } from "../servicios/pivot.servicio";
+import { crearPivotJob, obtenerPivotJob } from "../servicios/pivot-jobs.servicio";
 import { logger } from "../utilidades/registro.utilidad";
 import { cache } from "../utilidades/cache.utilidad";
 
@@ -70,6 +71,39 @@ export const ejecutarPivotControlador = async (
     logger.error("Error al ejecutar consulta pivot", error);
     throw error;
   }
+};
+
+export const crearPivotJobControlador = async (
+  request: FastifyRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const payload = request.body as PivotQueryPayload;
+    const job = crearPivotJob(payload);
+    return reply.status(202).send(job);
+  } catch (error) {
+    logger.error("Error al crear job pivot", error);
+    throw error;
+  }
+};
+
+export const obtenerPivotJobControlador = async (
+  request: FastifyRequest,
+  reply: FastifyReply
+) => {
+  const { jobId } = request.params as { jobId: string };
+  const job = obtenerPivotJob(jobId);
+
+  if (!job) {
+    return reply.status(404).send({
+      status: 404,
+      codigo: "JOB_PIVOT_NO_ENCONTRADO",
+      mensaje: "No se encontró el job solicitado",
+      requestId: request.id
+    });
+  }
+
+  return reply.status(200).send(job);
 };
 
 export const mesesOcupadosControlador = async (

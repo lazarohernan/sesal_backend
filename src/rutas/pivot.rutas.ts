@@ -2,7 +2,9 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   aniosDisponiblesPivotControlador,
   catalogoPivotControlador,
+  crearPivotJobControlador,
   ejecutarPivotControlador,
+  obtenerPivotJobControlador,
   valoresDimensionPivotControlador,
   estadisticasCacheControlador,
   mesesOcupadosControlador
@@ -36,6 +38,8 @@ const pivotRutas: FastifyPluginAsync = async (fastify) => {
   fastify.get("/meses-ocupados", { preHandler: catalogoRateLimit }, mesesOcupadosControlador);
   fastify.get("/dimensiones/:dimensionId/valores", { preHandler: catalogoRateLimit }, valoresDimensionPivotControlador);
   fastify.post("/consulta", { preHandler: pivotRateLimit }, ejecutarPivotControlador);
+  fastify.post("/consulta-async", { preHandler: pivotRateLimit }, crearPivotJobControlador);
+  fastify.get("/jobs/:jobId", { preHandler: catalogoRateLimit }, obtenerPivotJobControlador);
   fastify.get("/cache/stats", { preHandler: requireAdminAccess }, estadisticasCacheControlador);
 };
 
