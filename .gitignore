@@ -26,3 +26,7 @@ Thumbs.db
 # Scripts auxiliares
 scripts/
 *.zip
+.env
+*.zip
+DIAGNOSTICO_BACKEND.md
+test-cors.js
