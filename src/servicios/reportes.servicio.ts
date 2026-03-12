@@ -56,13 +56,13 @@ export const obtenerIndicadoresMunicipales = async (
           COALESCE(SUM(det.Q_AT_MEDICO_ESP), 0) AS medicosEspecialistas,
           COUNT(DISTINCT det.C_US) AS totalUnidades
         FROM (
-          SELECT DISTINCT CAST(C_US AS CHAR) AS C_US
+          SELECT DISTINCT CAST(C_US AS CHAR) COLLATE utf8mb4_unicode_ci AS C_US
           FROM BAS_BDR_US
           WHERE C_DEPARTAMENTO = ?
           ${condicionRegion}
         ) us
         STRAIGHT_JOIN ${TABLA_DETALLE} det
-          ON det.C_US = us.C_US
+          ON det.C_US COLLATE utf8mb4_unicode_ci = us.C_US
         WHERE det.N_ANIO = ?`;
 
       parametros.push(anio);

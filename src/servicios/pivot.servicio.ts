@@ -114,7 +114,7 @@ export interface PivotCatalogo {
 // JOINs con COLLATE explícito para evitar errores de mezcla de collations
 // CAST AS CHAR produce utf8mb4_0900_ai_ci, pero las tablas cat_* usan utf8mb4_unicode_ci
 const JOIN_DEFINITIONS: Record<JoinKey, string> = {
-  us: "LEFT JOIN BAS_BDR_US us ON det.C_US = CAST(us.C_US AS CHAR)",
+  us: "LEFT JOIN BAS_BDR_US us ON det.C_US COLLATE utf8mb4_unicode_ci = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci",
   cat_concepto:
     "LEFT JOIN cat_conceptos cat_concepto ON (TRIM(cat_concepto.codigo) COLLATE utf8mb4_unicode_ci = TRIM(det.C_CONCEPTO) COLLATE utf8mb4_unicode_ci OR TRIM(LEADING '0' FROM TRIM(cat_concepto.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci)",
   cat_concepto_ordenado:
