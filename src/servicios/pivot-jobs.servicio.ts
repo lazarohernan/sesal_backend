@@ -3,6 +3,11 @@ import { randomUUID } from "node:crypto";
 import { entorno } from "../configuracion";
 import type { PivotQueryPayload, PivotQueryResult } from "./pivot.servicio";
 import { ejecutarConsultaPivot } from "./pivot.servicio";
+import {
+  marcarConsultaPivotProcesando,
+  registrarFinConsultaPivot,
+  registrarInicioConsultaPivot
+} from "./pivot-analytics.servicio";
 import { logger } from "../utilidades/registro.utilidad";
 
 export type PivotJobStatus = "queued" | "processing" | "completed" | "failed";
@@ -11,6 +16,7 @@ interface PivotJobRecord {
   id: string;
   signature: string;
   payload: PivotQueryPayload;
+  logId?: string | null;
   status: PivotJobStatus;
   createdAt: string;
   startedAt?: string;
@@ -29,6 +35,11 @@ export interface PivotJobResponse {
   queuePosition?: number;
   resultado?: PivotQueryResult;
   error?: string;
+}
+
+interface PivotJobMetadata {
+  requestId?: string;
+  clientIp?: string;
 }
 
 const jobs = new Map<string, PivotJobRecord>();
@@ -108,18 +119,30 @@ const processQueue = () => {
     activeWorkers += 1;
     job.status = "processing";
     job.startedAt = new Date().toISOString();
+    void marcarConsultaPivotProcesando(job.logId ?? null);
+    const startedAt = Date.now();
 
     void ejecutarConsultaPivot(job.payload)
       .then((result) => {
         job.status = "completed";
         job.result = result;
         job.completedAt = new Date().toISOString();
+        return registrarFinConsultaPivot(job.logId ?? null, {
+          status: "completed",
+          durationMs: Date.now() - startedAt,
+          result
+        });
       })
       .catch((error) => {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : "Error procesando reporte";
         job.completedAt = new Date().toISOString();
         logger.error("Error procesando job pivot", { jobId: job.id, error: job.error });
+        return registrarFinConsultaPivot(job.logId ?? null, {
+          status: "failed",
+          durationMs: Date.now() - startedAt,
+          errorMessage: job.error
+        });
       })
       .finally(() => {
         activeWorkers = Math.max(0, activeWorkers - 1);
@@ -128,7 +151,10 @@ const processQueue = () => {
   }
 };
 
-export const crearPivotJob = (payload: PivotQueryPayload): PivotJobResponse => {
+export const crearPivotJob = (
+  payload: PivotQueryPayload,
+  metadata: PivotJobMetadata = {}
+): PivotJobResponse => {
   cleanupExpiredJobs();
 
   const signature = payloadSignature(payload);
@@ -152,6 +178,7 @@ export const crearPivotJob = (payload: PivotQueryPayload): PivotJobResponse => {
     id: randomUUID(),
     signature,
     payload,
+    logId: null,
     status: "queued",
     createdAt: new Date().toISOString()
   };
@@ -159,6 +186,17 @@ export const crearPivotJob = (payload: PivotQueryPayload): PivotJobResponse => {
   jobs.set(job.id, job);
   signatureToJob.set(signature, job.id);
   queue.push(job.id);
+  void registrarInicioConsultaPivot({
+    payload,
+    executionMode: "async",
+    requestId: metadata.requestId,
+    clientIp: metadata.clientIp,
+    jobId: job.id
+  }).then((logId) => {
+    if (logId) {
+      job.logId = logId;
+    }
+  });
   processQueue();
 
   return toResponse(job);

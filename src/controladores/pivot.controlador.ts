@@ -8,6 +8,10 @@ import {
   type PivotQueryPayload
 } from "../servicios/pivot.servicio";
 import { crearPivotJob, obtenerPivotJob } from "../servicios/pivot-jobs.servicio";
+import {
+  registrarFinConsultaPivot,
+  registrarInicioConsultaPivot
+} from "../servicios/pivot-analytics.servicio";
 import { logger } from "../utilidades/registro.utilidad";
 import { cache } from "../utilidades/cache.utilidad";
 
@@ -63,11 +67,29 @@ export const ejecutarPivotControlador = async (
   request: FastifyRequest,
   reply: FastifyReply
 ) => {
+  const payload = request.body as PivotQueryPayload;
+  const startedAt = Date.now();
+  const logId = await registrarInicioConsultaPivot({
+    payload,
+    executionMode: "sync",
+    requestId: request.id,
+    clientIp: request.ip
+  });
+
   try {
-    const payload = request.body as PivotQueryPayload;
     const resultado = await ejecutarConsultaPivot(payload);
+    await registrarFinConsultaPivot(logId, {
+      status: "completed",
+      durationMs: Date.now() - startedAt,
+      result: resultado
+    });
     return reply.status(200).send({ resultado, generadoEn: new Date().toISOString() });
   } catch (error) {
+    await registrarFinConsultaPivot(logId, {
+      status: "failed",
+      durationMs: Date.now() - startedAt,
+      errorMessage: error instanceof Error ? error.message : "Error al ejecutar consulta pivot"
+    });
     logger.error("Error al ejecutar consulta pivot", error);
     throw error;
   }
@@ -79,7 +101,10 @@ export const crearPivotJobControlador = async (
 ) => {
   try {
     const payload = request.body as PivotQueryPayload;
-    const job = crearPivotJob(payload);
+    const job = crearPivotJob(payload, {
+      requestId: request.id,
+      clientIp: request.ip
+    });
     return reply.status(202).send(job);
   } catch (error) {
     logger.error("Error al crear job pivot", error);
