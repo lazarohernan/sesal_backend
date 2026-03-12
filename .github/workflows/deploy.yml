@@ -97,7 +97,7 @@ jobs:
 
           sudo systemctl daemon-reload
           sudo systemctl restart "$SYSTEMD_SERVICE"
-          for intento in $(seq 1 15); do
+          for intento in $(seq 1 45); do
             estado="$(sudo systemctl is-active "$SYSTEMD_SERVICE" || true)"
             if [ "$estado" = "active" ] && curl -fsS http://127.0.0.1:4000/salud >/dev/null; then
               exit 0
