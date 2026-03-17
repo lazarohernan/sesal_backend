@@ -80,7 +80,17 @@ const formatearTipoEdad = (value: unknown): string | number => {
 const formatearEstablecimiento = (value: unknown): string | number => {
   const numero = normalizarNumero(value);
   if (numero === null) return "Sin dato";
-  return `US ${numero}`;
+  return numero;
+};
+
+const formatearDepartamento = (value: unknown): string | number => {
+  if (typeof value === "string" && value.trim() !== "") {
+    return value.trim();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  return "Sin dato";
 };
 
 const formatearCodigo = (prefix: string) => (value: unknown): string | number => {
@@ -91,6 +101,10 @@ const formatearCodigo = (prefix: string) => (value: unknown): string | number =>
 
 const BASE_FROM = `
   FROM EHO_BDT_EGR_GENERAL g
+  LEFT JOIN BAS_BDR_US us
+    ON us.C_US = g.C_US
+  LEFT JOIN BAS_BDR_DEPARTAMENTOS deptos
+    ON deptos.C_DEPARTAMENTO = us.C_DEPARTAMENTO
   LEFT JOIN EHO_CAT_SEXO sexo
     ON sexo.CODIGO = g.C_PAC_SEXO
   LEFT JOIN (
@@ -150,6 +164,13 @@ const BASE_FROM = `
 const DIMENSIONES: DimensionDef[] = [
   { id: "ANIO", label: "Año", column: "g.N_ANIO", type: "number" },
   { id: "MES", label: "Mes", column: "g.N_MES", type: "number", formatValue: formatearMes },
+  {
+    id: "DEPARTAMENTO",
+    label: "Departamento",
+    column: "COALESCE(deptos.D_DEPARTAMENTO, 'Sin departamento')",
+    type: "string",
+    formatValue: formatearDepartamento,
+  },
   { id: "ESTABLECIMIENTO", label: "Establecimiento", column: "g.C_US", type: "number", formatValue: formatearEstablecimiento },
   { id: "SEXO", label: "Sexo", column: "g.C_PAC_SEXO", type: "number", formatValue: formatearSexo },
   { id: "TIPO_EDAD", label: "Tipo de Edad", column: "g.C_PAC_EDAD_TIPO", type: "number", formatValue: formatearTipoEdad },
