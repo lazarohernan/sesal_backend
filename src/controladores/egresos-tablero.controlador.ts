@@ -1,0 +1,91 @@
+import type { FastifyRequest, FastifyReply } from "fastify";
+
+import {
+  obtenerAniosEgresosTablero,
+  obtenerDatosMapaHondurasEgresos,
+  obtenerIndicadoresDepartamentoEgresos,
+} from "../servicios/egresos-tablero.servicio";
+import { logger } from "../utilidades/registro.utilidad";
+
+export const obtenerMapaHondurasEgresosControlador = async (
+  request: FastifyRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const datos = await obtenerDatosMapaHondurasEgresos();
+    return reply.status(200).send({
+      datos,
+      generadoEn: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error("Error al obtener datos hospitalarios del mapa Honduras", error);
+    throw error;
+  }
+};
+
+export const obtenerAniosEgresosTableroControlador = async (
+  request: FastifyRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const anios = await obtenerAniosEgresosTablero();
+    return reply.status(200).send({
+      datos: anios,
+      generadoEn: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error("Error al obtener años hospitalarios del tablero", error);
+    throw error;
+  }
+};
+
+export const obtenerIndicadoresDepartamentoEgresosControlador = async (
+  request: FastifyRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const { anio, departamentoId, regionId } = request.query as Record<string, string | undefined>;
+
+    const anioNumero = anio ? Number(anio) : undefined;
+    const departamentoNumero = Number(departamentoId);
+    const regionNumero = regionId ? Number(regionId) : undefined;
+
+    if (anio !== undefined && (!Number.isFinite(anioNumero) || anioNumero! < 2023 || anioNumero! > 2030)) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El parámetro 'anio' debe ser un número válido entre 2023 y 2030",
+        campos: { anio },
+      });
+    }
+
+    if (!Number.isFinite(departamentoNumero) || departamentoNumero <= 0) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El parámetro 'departamentoId' es obligatorio y debe ser un número válido",
+        campos: { departamentoId },
+      });
+    }
+
+    if (regionNumero !== undefined && (!Number.isFinite(regionNumero) || regionNumero <= 0)) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El parámetro 'regionId' debe ser un número válido si se proporciona",
+        campos: { regionId },
+      });
+    }
+
+    const datos = await obtenerIndicadoresDepartamentoEgresos({
+      departamentoId: departamentoNumero,
+      regionId: regionNumero,
+      anio: anioNumero,
+    });
+
+    return reply.status(200).send({
+      datos,
+      generadoEn: new Date().toISOString(),
+    });
+  } catch (error) {
+    logger.error("Error al obtener indicadores hospitalarios por departamento", error);
+    throw error;
+  }
+};

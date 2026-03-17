@@ -3,377 +3,527 @@ import { obtenerPoolActual } from "../base_datos/pool";
 
 const tomarPool = () => obtenerPoolActual();
 
-// ── Dimensiones para AT2_DETALLE ────────────────────────────────────
+type AggregationType = "SUM" | "AVG" | "COUNT" | "MAX" | "MIN";
 
 interface DimensionDef {
   id: string;
   label: string;
   column: string;
   type: "string" | "number";
+  filterable?: boolean;
+  formatValue?: (value: unknown) => string | number;
 }
 
 interface MeasureDef {
   id: string;
   label: string;
+  description: string;
   expression: string;
+  defaultAggregation: AggregationType;
 }
 
+const MESES_LABELS: Record<number, string> = {
+  1: "Enero",
+  2: "Febrero",
+  3: "Marzo",
+  4: "Abril",
+  5: "Mayo",
+  6: "Junio",
+  7: "Julio",
+  8: "Agosto",
+  9: "Septiembre",
+  10: "Octubre",
+  11: "Noviembre",
+  12: "Diciembre",
+};
+
+const SEXO_LABELS: Record<number, string> = {
+  1: "Hombre",
+  2: "Mujer",
+  9: "Desconocido",
+};
+
+// Convención histórica usada en los egresos hospitalarios.
+const TIPO_EDAD_LABELS: Record<number, string> = {
+  1: "Horas",
+  2: "Días",
+  3: "Meses",
+  4: "Años",
+};
+
+const normalizarNumero = (value: unknown): number | null => {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const formatearMes = (value: unknown): string | number => {
+  const numero = normalizarNumero(value);
+  if (numero === null) return "Sin dato";
+  return MESES_LABELS[numero] ?? `Mes ${numero}`;
+};
+
+const formatearSexo = (value: unknown): string | number => {
+  const numero = normalizarNumero(value);
+  if (numero === null) return "Sin dato";
+  return SEXO_LABELS[numero] ?? `Código ${numero}`;
+};
+
+const formatearTipoEdad = (value: unknown): string | number => {
+  const numero = normalizarNumero(value);
+  if (numero === null) return "Sin dato";
+  return TIPO_EDAD_LABELS[numero] ?? `Tipo ${numero}`;
+};
+
+const formatearEstablecimiento = (value: unknown): string | number => {
+  const numero = normalizarNumero(value);
+  if (numero === null) return "Sin dato";
+  return `US ${numero}`;
+};
+
+const formatearCodigo = (prefix: string) => (value: unknown): string | number => {
+  const numero = normalizarNumero(value);
+  if (numero === null) return "Sin dato";
+  return `${prefix} ${numero}`;
+};
+
+const BASE_FROM = `
+  FROM EHO_BDT_EGR_GENERAL g
+  LEFT JOIN EHO_CAT_SEXO sexo
+    ON sexo.CODIGO = g.C_PAC_SEXO
+  LEFT JOIN (
+    SELECT
+      CAST(N_EDAD AS SIGNED) AS edad_num,
+      CAST(C_EDAD AS SIGNED) AS edad_tipo,
+      MAX(NULLIF(TRIM(GRUPO_EDAD_Quinquenal), '')) AS grupo_edad_quinquenal
+    FROM EHO_CAT_GRUPOS_EDAD
+    GROUP BY CAST(N_EDAD AS SIGNED), CAST(C_EDAD AS SIGNED)
+  ) grupo_edad
+    ON grupo_edad.edad_num = g.N_PAC_EDAD
+   AND grupo_edad.edad_tipo = g.C_PAC_EDAD_TIPO
+  LEFT JOIN (
+    SELECT
+      C_US,
+      N_ANIO,
+      N_MES,
+      N_PAGINA,
+      COUNT(*) AS total_diagnosticos
+    FROM EHO_BDT_EGR_DIAGNOSTICOS
+    GROUP BY C_US, N_ANIO, N_MES, N_PAGINA
+  ) dx
+    ON dx.C_US = g.C_US
+   AND dx.N_ANIO = g.N_ANIO
+   AND dx.N_MES = g.N_MES
+   AND dx.N_PAGINA = g.N_PAGINA
+  LEFT JOIN (
+    SELECT
+      C_US,
+      N_ANIO,
+      N_MES,
+      N_PAGINA,
+      COUNT(*) AS total_operaciones
+    FROM EHO_BDT_EGR_OPERACIONES
+    GROUP BY C_US, N_ANIO, N_MES, N_PAGINA
+  ) op
+    ON op.C_US = g.C_US
+   AND op.N_ANIO = g.N_ANIO
+   AND op.N_MES = g.N_MES
+   AND op.N_PAGINA = g.N_PAGINA
+  LEFT JOIN (
+    SELECT
+      C_US,
+      N_ANIO,
+      N_MES,
+      N_PAGINA,
+      COUNT(*) AS total_partos
+    FROM EHO_BDT_EGR_PARTOS
+    GROUP BY C_US, N_ANIO, N_MES, N_PAGINA
+  ) pt
+    ON pt.C_US = g.C_US
+   AND pt.N_ANIO = g.N_ANIO
+   AND pt.N_MES = g.N_MES
+   AND pt.N_PAGINA = g.N_PAGINA
+`;
+
 const DIMENSIONES: DimensionDef[] = [
-  { id: "REGION", label: "Región", column: "region", type: "number" },
-  { id: "MES", label: "Mes", column: "mes", type: "number" },
-  { id: "CONCEPTO", label: "Concepto", column: "concepto", type: "number" },
+  { id: "ANIO", label: "Año", column: "g.N_ANIO", type: "number" },
+  { id: "MES", label: "Mes", column: "g.N_MES", type: "number", formatValue: formatearMes },
+  { id: "ESTABLECIMIENTO", label: "Establecimiento", column: "g.C_US", type: "number", formatValue: formatearEstablecimiento },
+  { id: "SEXO", label: "Sexo", column: "g.C_PAC_SEXO", type: "number", formatValue: formatearSexo },
+  { id: "TIPO_EDAD", label: "Tipo de Edad", column: "g.C_PAC_EDAD_TIPO", type: "number", formatValue: formatearTipoEdad },
+  {
+    id: "GRUPO_EDAD",
+    label: "Grupo de Edad",
+    column: "COALESCE(grupo_edad.grupo_edad_quinquenal, 'Sin grupo')",
+    type: "string",
+  },
+  {
+    id: "CONDICION_SALIDA",
+    label: "Condición de Salida",
+    column: "g.C_CONDICION_SALIDA",
+    type: "number",
+    formatValue: formatearCodigo("Condición"),
+  },
+  {
+    id: "RAZON_SALIDA",
+    label: "Razón de Salida",
+    column: "g.C_RAZON_SALIDA",
+    type: "number",
+    formatValue: formatearCodigo("Razón"),
+  },
 ];
 
 const MEDIDAS: MeasureDef[] = [
-  { id: "TOTAL", label: "Total de Atenciones", expression: "SUM(enfermera_aux + enfermera_pro + medico_gen + medico_esp)" },
-  { id: "ENFERMERA_AUX", label: "Enfermera Auxiliar", expression: "SUM(enfermera_aux)" },
-  { id: "ENFERMERA_PRO", label: "Enfermera Profesional", expression: "SUM(enfermera_pro)" },
-  { id: "MEDICO_GEN", label: "Médico General", expression: "SUM(medico_gen)" },
-  { id: "MEDICO_ESP", label: "Médico Especialista", expression: "SUM(medico_esp)" },
+  {
+    id: "TOTAL_EGRESOS",
+    label: "Total de Egresos",
+    description: "Cantidad total de egresos hospitalarios",
+    expression: "COUNT(*)",
+    defaultAggregation: "COUNT",
+  },
+  {
+    id: "DIAS_ESTANCIA",
+    label: "Días de Estancia",
+    description: "Suma de días de estancia registrados",
+    expression: "SUM(COALESCE(g.Q_DIAS_ESTANCIA, 0))",
+    defaultAggregation: "SUM",
+  },
+  {
+    id: "ESTANCIA_PROMEDIO",
+    label: "Estancia Promedio",
+    description: "Promedio de días de estancia",
+    expression: "ROUND(AVG(COALESCE(g.Q_DIAS_ESTANCIA, 0)), 2)",
+    defaultAggregation: "AVG",
+  },
+  {
+    id: "TOTAL_DIAGNOSTICOS",
+    label: "Total de Diagnósticos",
+    description: "Diagnósticos asociados a los egresos",
+    expression: "SUM(COALESCE(dx.total_diagnosticos, 0))",
+    defaultAggregation: "SUM",
+  },
+  {
+    id: "TOTAL_OPERACIONES",
+    label: "Total de Operaciones",
+    description: "Operaciones asociadas a los egresos",
+    expression: "SUM(COALESCE(op.total_operaciones, 0))",
+    defaultAggregation: "SUM",
+  },
+  {
+    id: "TOTAL_PARTOS",
+    label: "Total de Partos",
+    description: "Partos asociados a los egresos",
+    expression: "SUM(COALESCE(pt.total_partos, 0))",
+    defaultAggregation: "SUM",
+  },
+  {
+    id: "REFERIDOS",
+    label: "Referidos",
+    description: "Egresos con referencia a otra US",
+    expression: "SUM(CASE WHEN COALESCE(g.C_US_REFERIDO, 0) <> 0 THEN 1 ELSE 0 END)",
+    defaultAggregation: "SUM",
+  },
 ];
 
-const REGIONES_LABELS: Record<number, string> = {
-  1: "Departamental de Atlántida",
-  2: "Departamental de Colón",
-  3: "Departamental de Comayagua",
-  4: "Departamental de Copán",
-  5: "Departamental de Cortés",
-  6: "Departamental de Choluteca",
-  7: "Departamental de El Paraíso",
-  8: "Departamental de Francisco Morazán",
-  9: "Departamental de Gracias a Dios",
-  10: "Departamental de Intibucá",
-  11: "Departamental de Islas de la Bahía",
-  12: "Departamental de La Paz",
-  13: "Departamental de Lempira",
-  14: "Departamental de Ocotepeque",
-  15: "Departamental de Olancho",
-  16: "Departamental de Santa Bárbara",
-  17: "Departamental de Valle",
-  18: "Departamental de Yoro",
-  19: "Metropolitana del Distrito Central",
-  20: "Metropolitana de San Pedro Sula",
+const obtenerDimension = (dimensionId: string) => DIMENSIONES.find((dim) => dim.id === dimensionId);
+
+const obtenerMedida = (measureId: string) => MEDIDAS.find((measure) => measure.id === measureId);
+
+const formatearDimension = (dimension: DimensionDef, value: unknown) => {
+  if (dimension.formatValue) {
+    return dimension.formatValue(value);
+  }
+  return value ?? "Sin dato";
 };
 
-const MESES_LABELS: Record<number, string> = {
-  1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
-  5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
-  9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+const normalizarValorMedida = (value: unknown) => {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  return value;
 };
 
-const CONCEPTOS_LABELS: Record<number, string> = {
-  1: "Menores de 1 Mes 1a. Vez",
-  2: "Menores de 1 Mes Subsiguiente",
-  3: "1 Mes a 1 Año 1a. Vez",
-  4: "1 Mes a 1 Año Subsiguiente",
-  5: "1 - 4 Años 1a. Vez",
-  6: "1 - 4 Años Subsiguiente",
-  7: "5 - 9 Años 1a. Vez",
-  8: "5 - 9 Años Subsiguiente",
-  9: "10 - 14 Años 1a. Vez",
-  10: "10 - 14 Años Subsiguiente",
-  11: "15 - 19 Años 1a. Vez",
-  12: "15 - 19 Años Subsiguiente",
-  13: "20 - 49 Años 1a. Vez",
-  14: "20 - 49 Años Subsiguiente",
-  15: "50 - 59 Años 1a. Vez",
-  16: "50 - 59 Años Subsiguiente",
-  17: "60 y + Años 1a. Vez",
-  18: "60 y + Años Subsiguiente",
-  19: "Total Pacientes Atendidos",
-  20: "Número de Atenciones de Mujeres",
-  21: "Número de Atenciones de Hombres",
-  22: "Número de Atenciones Espontáneas",
-  23: "Número de Atenciones Referidas",
-  24: "Atenciones del Recién Nacido Control Temprano <5 días",
-  25: "Menores de 5 años con Diarrea",
-  26: "Menores de 5 años con Diarrea en Seguimiento",
-  27: "Menores de 5 años con Deshidratación Rehidratados",
-  28: "Menores de 5 años con Neumonía nuevos",
-  29: "Menores de 5 años con Neumonía en Seguimiento",
-  30: "Menores de 5 años con Síndrome Anémico",
-  31: "Menores de 5 años con crecimiento adecuado",
-  32: "Menores de 5 años sin desnutrición crónica",
-  33: "Menores de 5 años con baja talla y baja talla severa",
-  34: "Menores de 5 años sin desnutrición aguda ni sobrepeso",
-  35: "Menores de 5 años emaciados y severamente emaciados",
-  36: "Menores de 5 años con sobrepeso y obesidad",
-  37: "Menores de 5 años con crecimiento inadecuado persistente",
-  38: "Menores de 5 años con Discapacidad Nuevos",
-  39: "Menores de 5 años con Probable Alteración del Desarrollo",
-  40: "Total de menores de 5 años Atendidos",
-  41: "Anticonceptivo Oral Combinado",
-  42: "Anticonceptivos Orales con Progestina sola",
-  43: "Inyectables trimestral",
-  44: "Autoinyectables trimestral",
-  45: "DIU con cobre insertados",
-  46: "DIU con levonorgestrel insertados",
-  47: "Implante con levonorgestrel 5 años",
-  48: "Implante con Etonogestrel 3 años",
-  49: "Retiro de implante",
-  50: "Retiro de DIU",
-  51: "Detección de Cáncer Cérvico Uterino",
-  52: "Consejerías de planificación familiar",
-  53: "AQV Ambulatoria Mujeres",
-  54: "AQV Ambulatoria Hombres",
-  55: "PAE brindado",
-  56: "Entrega de condones",
-  57: "Atención por aborto ambulatorio",
-  58: "Atención Prenatal Nueva 10-19 años",
-  59: "Atención Prenatal Nueva ≤12 Semanas",
-  60: "Atención Prenatal Nueva >12 Semanas",
-  61: "Atenciones prenatales subsiguientes",
-  62: "Atenciones puerperales 3-7 días",
-  63: "Atenciones puerperales >7 días",
-  64: "Total de Controles Puerperales",
-  65: "Atenciones por Violencia Sexual",
-  66: "Atención adolescentes 10-19 años mujeres",
-  67: "Atención adolescentes 10-19 años varones",
-  68: "Detección Casos presuntivos de Tuberculosis",
-  69: "Diabetes Mellitus Nuevas",
-  70: "Diabetes Mellitus Subsiguientes",
-  71: "HTA Nuevas",
-  72: "HTA Subsiguientes",
-  73: "Enfermedad Renal Crónica Nuevas",
-  74: "Enfermedad Renal Crónica Subsiguientes",
-  75: "Cáncer Cérvico Uterino Nuevas",
-  76: "Cáncer Cérvico Uterino Subsiguientes",
-  77: "Cáncer Priorizados Nuevas",
-  78: "Cáncer Priorizados Subsiguientes",
-  79: "Atenciones psicología-psiquiatría",
-  80: "Atenciones a Migrantes Irregulares",
-  81: "Atenciones a Migrantes hondureños retornados",
-  82: "Maya Chortí",
-  83: "Lenca",
-  84: "Misquito",
-  85: "Nahua",
-  86: "Pech (Paya)",
-  87: "Tolupán",
-  88: "Tawaka (Sumo)",
-  89: "Garífuna",
-  90: "Negro Inglés",
-  91: "Otro",
-  92: "No Sabe / Ninguno",
+const normalizarMedidas = (
+  row: Record<string, unknown>,
+  measures: MeasureDef[]
+): Record<string, unknown> => {
+  const normalized = { ...row };
+  for (const measure of measures) {
+    if (Object.prototype.hasOwnProperty.call(normalized, measure.label)) {
+      normalized[measure.label] = normalizarValorMedida(normalized[measure.label]);
+    }
+  }
+  return normalized;
 };
 
-// ── Catálogo ──────────────────────────────────────────────────────────────
+const obtenerAniosSolicitados = (payload: EgresosPivotPayload): number[] => {
+  const sourceYears = payload.years?.length ? payload.years : payload.year ? [payload.year] : [];
+  return Array.from(
+    new Set(
+      sourceYears
+        .map((year) => Number(year))
+        .filter((year) => Number.isInteger(year) && year >= 2000 && year <= 2100)
+    )
+  ).sort((a, b) => a - b);
+};
 
-export const obtenerCatalogoEgresos = () => {
+const construirWhere = (payload: EgresosPivotPayload, anios: number[]) => {
+  const whereParts: string[] = [];
+  const whereParams: Array<string | number> = [];
+
+  if (anios.length > 0) {
+    whereParts.push(`g.N_ANIO IN (${anios.map(() => "?").join(",")})`);
+    whereParams.push(...anios);
+  }
+
+  for (const filter of payload.filters ?? []) {
+    const dimension = obtenerDimension(filter.field);
+    if (!dimension || !dimension.filterable && dimension.filterable !== undefined) continue;
+    if (!filter.values || filter.values.length === 0) continue;
+    const values = filter.values.filter((value) => value !== undefined && value !== null && value !== "");
+    if (values.length === 0) continue;
+
+    const placeholders = values.map(() => "?").join(",");
+    whereParts.push(`${dimension.column} IN (${placeholders})`);
+    whereParams.push(...values);
+  }
+
   return {
-    dimensiones: DIMENSIONES.map(d => ({
-      id: d.id,
-      etiqueta: d.label,
-      tipo: d.type,
-      admiteFiltrado: true,
-      endpointValores: `/api/egresos-pivot/dimensiones/${d.id}/valores`,
-    })),
-    medidas: MEDIDAS.map(m => ({
-      id: m.id,
-      etiqueta: m.label,
-      descripcion: m.label,
-      tipoValor: "number" as const,
-      agregacionDefault: "SUM" as const,
-    })),
-    aniosDisponibles: [2026],
+    whereClause: whereParts.length > 0 ? ` WHERE ${whereParts.join(" AND ")}` : "",
+    whereParams,
   };
 };
 
-// ── Valores de dimensión ──────────────────────────────────────────────────
+const enriquecerFila = (
+  row: Record<string, unknown>,
+  dimensions: DimensionDef[]
+): Record<string, unknown> => {
+  const enriched = { ...row };
+  for (const dimension of dimensions) {
+    if (Object.prototype.hasOwnProperty.call(enriched, dimension.label)) {
+      enriched[dimension.label] = formatearDimension(dimension, enriched[dimension.label]);
+    }
+  }
+  return enriched;
+};
+
+export const obtenerAniosEgresos = async (): Promise<number[]> => {
+  const pool = tomarPool();
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT DISTINCT g.N_ANIO AS anio
+     FROM EHO_BDT_EGR_GENERAL g
+     ORDER BY g.N_ANIO DESC`
+  );
+
+  return rows
+    .map((row) => Number(row.anio))
+    .filter((anio) => Number.isInteger(anio));
+};
+
+export const obtenerCatalogoEgresos = async () => {
+  const aniosDisponibles = await obtenerAniosEgresos();
+
+  return {
+    dimensiones: DIMENSIONES.map((dimension) => ({
+      id: dimension.id,
+      etiqueta: dimension.label,
+      tipo: dimension.type,
+      admiteFiltrado: true,
+      endpointValores: `/api/egresos-pivot/dimensiones/${dimension.id}/valores`,
+    })),
+    medidas: MEDIDAS.map((measure) => ({
+      id: measure.id,
+      etiqueta: measure.label,
+      descripcion: measure.description,
+      tipoValor: "number" as const,
+      agregacionPorDefecto: measure.defaultAggregation,
+    })),
+    aniosDisponibles,
+    actualizadoEn: new Date().toISOString(),
+  };
+};
 
 export const obtenerValoresDimensionEgresos = async (
   dimensionId: string,
   busqueda?: string,
   limite?: number
-): Promise<Array<{ valor: number; etiqueta: string }>> => {
-  const dim = DIMENSIONES.find(d => d.id === dimensionId);
-  if (!dim) return [];
+): Promise<Array<{ valor: number | string; etiqueta: string }>> => {
+  const dimension = obtenerDimension(dimensionId);
+  if (!dimension) return [];
 
-  if (dimensionId === "REGION") {
-    let valores = Object.entries(REGIONES_LABELS).map(([k, v]) => ({
-      valor: Number(k),
-      etiqueta: `${k}. ${v}`,
-    }));
-    if (busqueda) {
-      const b = busqueda.toLowerCase();
-      valores = valores.filter(v => v.etiqueta.toLowerCase().includes(b));
-    }
-    return valores;
+  const pool = tomarPool();
+  let sql = `SELECT DISTINCT ${dimension.column} AS valor ${BASE_FROM}`;
+  const params: Array<string | number> = [];
+
+  if (busqueda?.trim()) {
+    sql += ` WHERE CAST(${dimension.column} AS CHAR) LIKE ?`;
+    params.push(`%${busqueda.trim()}%`);
   }
 
-  if (dimensionId === "MES") {
-    let valores = Object.entries(MESES_LABELS).map(([k, v]) => ({
-      valor: Number(k),
-      etiqueta: v,
-    }));
-    if (busqueda) {
-      const b = busqueda.toLowerCase();
-      valores = valores.filter(v => v.etiqueta.toLowerCase().includes(b));
-    }
-    return valores;
+  sql += ` ORDER BY ${dimension.column}`;
+  if (limite) {
+    sql += ` LIMIT ${Math.min(Math.max(limite, 1), 200)}`;
   }
 
-  if (dimensionId === "CONCEPTO") {
-    const pool = tomarPool();
-    let sql = `SELECT DISTINCT concepto as valor FROM AT2_DETALLE ORDER BY concepto`;
-    if (limite) sql += ` LIMIT ${Math.min(limite, 200)}`;
-    const [rows] = await pool.query<RowDataPacket[]>(sql);
-    let valores = rows.map(r => {
-      const num = r.valor as number;
-      return {
-        valor: num,
-        etiqueta: CONCEPTOS_LABELS[num] ?? `Concepto ${num}`,
-      };
+  const [rows] = await pool.query<RowDataPacket[]>(sql, params);
+  return rows
+    .filter((row) => row.valor !== null && row.valor !== undefined)
+    .map((row) => {
+    const valor = row.valor as string | number;
+    const etiqueta = String(formatearDimension(dimension, valor));
+    return { valor, etiqueta };
     });
-    if (busqueda) {
-      const b = busqueda.toLowerCase();
-      valores = valores.filter(v => v.etiqueta.toLowerCase().includes(b));
-    }
-    return valores;
-  }
-
-  return [];
 };
 
-// ── Consulta pivot ────────────────────────────────────────────────────────
-
 export interface EgresosPivotPayload {
+  year?: number;
+  years?: number[];
   filters?: Array<{ field: string; values?: Array<string | number> }>;
   rows?: string[];
   columns?: string[];
   values: Array<{ field: string; aggregation?: string }>;
   limit?: number;
+  includeTotals?: boolean;
 }
 
 export const ejecutarConsultaEgresos = async (
   payload: EgresosPivotPayload
 ): Promise<{
   datos: Array<Record<string, unknown>>;
+  totalGeneral: Record<string, unknown> | null;
+  aniosConsultados: number[];
   metadata: {
     dimensionesFilas: string[];
     dimensionesColumnas: string[];
+    dimensionesSeleccionadas: string[];
     medidasSeleccionadas: string[];
   };
 }> => {
   const pool = tomarPool();
-
-  // Resolver dimensiones de filas y columnas
+  const aniosConsultados = obtenerAniosSolicitados(payload);
   const filaDims = (payload.rows ?? [])
-    .map(id => DIMENSIONES.find(d => d.id === id))
-    .filter((d): d is DimensionDef => d !== undefined);
-
+    .map(obtenerDimension)
+    .filter((dim): dim is DimensionDef => dim !== undefined);
   const colDims = (payload.columns ?? [])
-    .map(id => DIMENSIONES.find(d => d.id === id))
-    .filter((d): d is DimensionDef => d !== undefined);
-
+    .map(obtenerDimension)
+    .filter((dim): dim is DimensionDef => dim !== undefined);
   const allDims = [...filaDims, ...colDims];
 
-  // Resolver medidas
   const medidasSel = payload.values
-    .map(v => {
-      const m = MEDIDAS.find(med => med.id === v.field);
-      return m ? { ...m, agg: v.aggregation ?? "SUM" } : null;
-    })
-    .filter((m): m is MeasureDef & { agg: string } => m !== null);
+    .map((value) => obtenerMedida(value.field))
+    .filter((measure): measure is MeasureDef => measure !== undefined);
 
   if (medidasSel.length === 0) {
-    medidasSel.push({ ...MEDIDAS[0], agg: "SUM" });
+    medidasSel.push(MEDIDAS[0]!);
   }
 
-  // SELECT
-  const selectParts: string[] = [];
-  for (const dim of allDims) {
-    selectParts.push(`${dim.column} AS \`${dim.label}\``);
-  }
-  for (const med of medidasSel) {
-    selectParts.push(`${med.expression} AS \`${med.label}\``);
-  }
+  const selectParts = [
+    ...allDims.map((dim) => `${dim.column} AS \`${dim.label}\``),
+    ...medidasSel.map((measure) => `${measure.expression} AS \`${measure.label}\``),
+  ];
 
-  if (selectParts.length === 0) {
-    for (const med of medidasSel) {
-      selectParts.push(`${med.expression} AS \`${med.label}\``);
-    }
+  const { whereClause, whereParams } = construirWhere(payload, aniosConsultados);
+  const sqlParts = [`SELECT ${selectParts.join(", ")}`, BASE_FROM, whereClause];
+
+  if (allDims.length > 0) {
+    sqlParts.push(` GROUP BY ${allDims.map((dim) => dim.column).join(", ")}`);
+    sqlParts.push(` ORDER BY ${allDims.map((dim) => dim.column).join(", ")}`);
   }
 
-  // WHERE
-  const whereParts: string[] = ["anio = 2026"];
-  const whereParams: Array<string | number> = [];
+  sqlParts.push(` LIMIT ${Math.min(Math.max(payload.limit ?? 5000, 1), 10000)}`);
 
-  if (payload.filters) {
-    for (const filter of payload.filters) {
-      const dim = DIMENSIONES.find(d => d.id === filter.field);
-      if (dim && filter.values && filter.values.length > 0) {
-        const placeholders = filter.values.map(() => "?").join(",");
-        whereParts.push(`${dim.column} IN (${placeholders})`);
-        whereParams.push(...filter.values);
-      }
-    }
+  const [rows] = await pool.query<RowDataPacket[]>(sqlParts.join(""), whereParams);
+  const datos = rows.map((row) =>
+    normalizarMedidas(
+      enriquecerFila(row as Record<string, unknown>, allDims),
+      medidasSel
+    )
+  );
+
+  let totalGeneral: Record<string, unknown> | null = null;
+  if (payload.includeTotals !== false) {
+    const totalSql = `
+      SELECT ${medidasSel.map((measure) => `${measure.expression} AS \`${measure.label}\``).join(", ")}
+      ${BASE_FROM}
+      ${whereClause}
+    `;
+    const [totalRows] = await pool.query<RowDataPacket[]>(totalSql, whereParams);
+    totalGeneral = totalRows[0]
+      ? normalizarMedidas(totalRows[0] as Record<string, unknown>, medidasSel)
+      : null;
   }
-
-  // GROUP BY
-  const groupByParts = allDims.map(d => d.column);
-
-  // ORDER BY
-  const orderByParts = allDims.map(d => d.column);
-
-  // BUILD SQL
-  let sql = `SELECT ${selectParts.join(", ")} FROM AT2_DETALLE`;
-  sql += ` WHERE ${whereParts.join(" AND ")}`;
-  if (groupByParts.length > 0) {
-    sql += ` GROUP BY ${groupByParts.join(", ")}`;
-    sql += ` ORDER BY ${orderByParts.join(", ")}`;
-  }
-
-  const limit = Math.min(payload.limit ?? 5000, 10000);
-  sql += ` LIMIT ${limit}`;
-
-  const [rows] = await pool.query<RowDataPacket[]>(sql, whereParams);
-
-  // Enriquecer con etiquetas
-  const datos = (rows as Array<Record<string, unknown>>).map(row => {
-    const enriched = { ...row };
-    if ("Región" in enriched) {
-      const regId = enriched["Región"] as number;
-      enriched["Región"] = REGIONES_LABELS[regId]
-        ? `${regId}. ${REGIONES_LABELS[regId]}`
-        : `Región ${regId}`;
-    }
-    if ("Mes" in enriched) {
-      const mesId = enriched["Mes"] as number;
-      enriched["Mes"] = MESES_LABELS[mesId] ?? `Mes ${mesId}`;
-    }
-    if ("Concepto" in enriched) {
-      const concId = enriched["Concepto"] as number;
-      enriched["Concepto"] = CONCEPTOS_LABELS[concId] ?? `Concepto ${concId}`;
-    }
-    return enriched;
-  });
 
   return {
     datos,
+    totalGeneral,
+    aniosConsultados,
     metadata: {
-      dimensionesFilas: filaDims.map(d => d.label),
-      dimensionesColumnas: colDims.map(d => d.label),
-      medidasSeleccionadas: medidasSel.map(m => m.label),
+      dimensionesFilas: filaDims.map((dim) => dim.label),
+      dimensionesColumnas: colDims.map((dim) => dim.label),
+      dimensionesSeleccionadas: allDims.map((dim) => dim.label),
+      medidasSeleccionadas: medidasSel.map((measure) => measure.label),
     },
   };
 };
 
-// ── Resumen para dashboard ────────────────────────────────────────────────
-
 export const obtenerResumenEgresos = async () => {
   const pool = tomarPool();
-
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT
-       region,
-       SUM(enfermera_aux + enfermera_pro + medico_gen + medico_esp) as total,
-       COUNT(DISTINCT mes) as meses_reportados,
-       COUNT(DISTINCT concepto) as conceptos
-     FROM AT2_DETALLE
-     WHERE anio = 2026
-     GROUP BY region
-     ORDER BY region`
+    `
+      SELECT
+        g.N_ANIO AS anio,
+        COUNT(*) AS total_egresos,
+        SUM(COALESCE(g.Q_DIAS_ESTANCIA, 0)) AS dias_estancia,
+        SUM(COALESCE(dx.total_diagnosticos, 0)) AS total_diagnosticos,
+        SUM(COALESCE(op.total_operaciones, 0)) AS total_operaciones,
+        SUM(COALESCE(pt.total_partos, 0)) AS total_partos
+      ${BASE_FROM}
+      GROUP BY g.N_ANIO
+      ORDER BY g.N_ANIO
+    `
   );
 
-  return rows;
+  return rows.map((row) =>
+    normalizarMedidas(row as Record<string, unknown>, [
+      {
+        id: "TOTAL_EGRESOS",
+        label: "total_egresos",
+        description: "",
+        expression: "",
+        defaultAggregation: "COUNT",
+      },
+      {
+        id: "DIAS_ESTANCIA",
+        label: "dias_estancia",
+        description: "",
+        expression: "",
+        defaultAggregation: "SUM",
+      },
+      {
+        id: "TOTAL_DIAGNOSTICOS",
+        label: "total_diagnosticos",
+        description: "",
+        expression: "",
+        defaultAggregation: "SUM",
+      },
+      {
+        id: "TOTAL_OPERACIONES",
+        label: "total_operaciones",
+        description: "",
+        expression: "",
+        defaultAggregation: "SUM",
+      },
+      {
+        id: "TOTAL_PARTOS",
+        label: "total_partos",
+        description: "",
+        expression: "",
+        defaultAggregation: "SUM",
+      },
+    ])
+  );
 };

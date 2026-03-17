@@ -1,6 +1,7 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import {
   obtenerCatalogoEgresos,
+  obtenerAniosEgresos,
   obtenerValoresDimensionEgresos,
   ejecutarConsultaEgresos,
   obtenerResumenEgresos,
@@ -12,7 +13,7 @@ export const catalogoEgresosControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    const catalogo = obtenerCatalogoEgresos();
+    const catalogo = await obtenerCatalogoEgresos();
     return reply.send(catalogo);
   } catch (error) {
     logger.error("Error al obtener catálogo egresos", error);
@@ -47,7 +48,8 @@ export const aniosEgresosControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    return reply.send({ anios: [2026] });
+    const anios = await obtenerAniosEgresos();
+    return reply.send({ anios });
   } catch (error) {
     throw error;
   }
@@ -72,14 +74,10 @@ export const consultaEgresosControlador = async (
     return reply.send({
       resultado: {
         datos: resultado.datos,
-        totalGeneral: null,
-        aniosConsultados: [2026],
+        totalGeneral: resultado.totalGeneral,
+        aniosConsultados: resultado.aniosConsultados,
         metadata: {
           ...resultado.metadata,
-          dimensionesSeleccionadas: [
-            ...resultado.metadata.dimensionesFilas,
-            ...resultado.metadata.dimensionesColumnas,
-          ],
         },
       },
       generadoEn: new Date().toISOString(),
@@ -98,7 +96,6 @@ export const resumenEgresosControlador = async (
     const datos = await obtenerResumenEgresos();
     return reply.send({
       datos,
-      anio: 2026,
       generadoEn: new Date().toISOString(),
     });
   } catch (error) {

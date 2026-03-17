@@ -7,6 +7,7 @@ import reportesRutas from "./reportes.rutas";
 import healthRutas from "./health.rutas";
 import registroHospitalarioRutas from "./registro-hospitalario.rutas";
 import egresosPivotRutas from "./egresos-pivot.rutas";
+import egresosTableroRutas from "./egresos-tablero.rutas";
 
 export const registrarRutas: FastifyPluginAsync = async (fastify) => {
   fastify.register(tableroRutas, { prefix: "/tablero" });
@@ -15,6 +16,7 @@ export const registrarRutas: FastifyPluginAsync = async (fastify) => {
   fastify.register(healthRutas, { prefix: "/health" });
   fastify.register(registroHospitalarioRutas, { prefix: "/registro-hospitalario" });
   fastify.register(egresosPivotRutas, { prefix: "/egresos-pivot" });
+  fastify.register(egresosTableroRutas, { prefix: "/egresos-tablero" });
   fastify.register(configuracionRutas);
 };
 
