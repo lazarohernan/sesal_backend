@@ -1,5 +1,6 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { obtenerIndicadoresMunicipales, obtenerEstadisticasCache } from "../servicios/reportes.servicio";
+import { AlcanceRegionalError, resolverRegionesPermitidas } from "../utilidades/alcance-regional.util";
 import { logger } from "../utilidades/registro.utilidad";
 
 export const obtenerIndicadoresMunicipalesControlador = async (
@@ -39,11 +40,13 @@ export const obtenerIndicadoresMunicipalesControlador = async (
     }
 
     const limiteSeguro = Number.isFinite(limiteNumero) && limiteNumero > 0 ? limiteNumero : 0;
+    const regionesPermitidas = resolverRegionesPermitidas(request.usuarioActual, regionNumero);
+
     const datos = await obtenerIndicadoresMunicipales({
       anio: anioNumero,
       departamentoId: departamentoNumero,
       limite: limiteSeguro,
-      regionId: regionNumero
+      regionIds: regionesPermitidas ?? undefined
     });
 
     return reply.status(200).send({
@@ -51,6 +54,12 @@ export const obtenerIndicadoresMunicipalesControlador = async (
       generadoEn: new Date().toISOString()
     });
   } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message
+      });
+    }
     logger.error("Error al obtener indicadores municipales", error);
     throw error;
   }

@@ -5,6 +5,7 @@ import {
   obtenerDatosMapaHondurasEgresos,
   obtenerIndicadoresDepartamentoEgresos,
 } from "../servicios/egresos-tablero.servicio";
+import { AlcanceRegionalError, obtenerRegionesPermitidasUsuario, resolverRegionesPermitidas } from "../utilidades/alcance-regional.util";
 import { logger } from "../utilidades/registro.utilidad";
 
 export const obtenerMapaHondurasEgresosControlador = async (
@@ -12,12 +13,19 @@ export const obtenerMapaHondurasEgresosControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    const datos = await obtenerDatosMapaHondurasEgresos();
+    const regionesPermitidas = obtenerRegionesPermitidasUsuario(request.usuarioActual);
+    const datos = await obtenerDatosMapaHondurasEgresos(regionesPermitidas);
     return reply.status(200).send({
       datos,
       generadoEn: new Date().toISOString(),
     });
   } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message,
+      });
+    }
     logger.error("Error al obtener datos hospitalarios del mapa Honduras", error);
     throw error;
   }
@@ -74,9 +82,11 @@ export const obtenerIndicadoresDepartamentoEgresosControlador = async (
       });
     }
 
+    const regionesPermitidas = resolverRegionesPermitidas(request.usuarioActual, regionNumero);
+
     const datos = await obtenerIndicadoresDepartamentoEgresos({
       departamentoId: departamentoNumero,
-      regionId: regionNumero,
+      regionIds: regionesPermitidas ?? undefined,
       anio: anioNumero,
     });
 
@@ -85,6 +95,12 @@ export const obtenerIndicadoresDepartamentoEgresosControlador = async (
       generadoEn: new Date().toISOString(),
     });
   } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message,
+      });
+    }
     logger.error("Error al obtener indicadores hospitalarios por departamento", error);
     throw error;
   }

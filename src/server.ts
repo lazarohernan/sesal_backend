@@ -1,8 +1,10 @@
+import "./tipos/fastify";
 import { buildApp } from "./aplicacion";
 import { entorno } from "./configuracion";
 import { logger } from "./utilidades/registro.utilidad";
 import { inicializarPool, pool } from "./base_datos/pool";
 import { configuracionBDServicio } from "./servicios/configuracion-bd.servicio";
+import { authServicio } from "./servicios/auth.servicio";
 
 const puerto = entorno.puerto;
 const DEFAULT_PREWARM_YEARS = [2025, 2024, 2023, 2022];
@@ -60,6 +62,9 @@ const iniciar = async () => {
   try {
     await configuracionBDServicio.cargarConfiguracionPersistida();
     await inicializarPool();
+    if (pool) {
+      await authServicio.inicializar();
+    }
     logger.info("Configuracion de BD lista");
   } catch (error) {
     logger.warn(

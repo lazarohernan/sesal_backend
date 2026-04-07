@@ -139,6 +139,25 @@ const JOIN_DEFINITIONS: Record<JoinKey, string> = {
     "LEFT JOIN AT2_BDR_CONCEPTOS_GE concepto_ge ON concepto_ge.C_CONCEPTO COLLATE utf8mb4_unicode_ci = det.C_CONCEPTO COLLATE utf8mb4_unicode_ci AND concepto_ge.V_FORMULARIO COLLATE utf8mb4_unicode_ci = det.V_FORMULARIO COLLATE utf8mb4_unicode_ci"
 };
 
+const ETIQUETA_ESTABLECIMIENTO_SQL = `
+  CONCAT(
+    COALESCE(cat_establecimiento.nombre, CAST(det.C_US AS CHAR)),
+    ' (RUPS: ',
+    CAST(det.C_US AS CHAR),
+    ')',
+    CASE
+      WHEN cat_nivel_establecimiento.descripcion IS NOT NULL
+        THEN CONCAT(' - ', cat_nivel_establecimiento.descripcion)
+      ELSE ''
+    END,
+    CASE
+      WHEN municipios.D_MUNICIPIO IS NOT NULL
+        THEN CONCAT(' - ', municipios.D_MUNICIPIO)
+      ELSE ''
+    END
+  )
+`;
+
 const DIMENSIONES: Record<string, DimensionDefinition> = {
   ANIO: {
     id: "ANIO",
@@ -234,18 +253,18 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Establecimiento de Salud",
     alias: "establecimiento",
     type: "string",
-    select: "COALESCE(cat_establecimiento.nombre, det.C_US)",
-    groupBy: "COALESCE(cat_establecimiento.nombre, det.C_US)",
+    select: ETIQUETA_ESTABLECIMIENTO_SQL,
+    groupBy: "det.C_US, cat_establecimiento.nombre, cat_nivel_establecimiento.descripcion, municipios.D_MUNICIPIO",
     valueExpr: "det.C_US",
-    joins: ["cat_establecimiento"],
-    orderBy: "COALESCE(cat_establecimiento.nombre, det.C_US)",
+    joins: ["us", "cat_establecimiento", "cat_nivel_establecimiento", "municipios"],
+    orderBy: "cat_establecimiento.nombre",
     catalog: {
       table: "cat_establecimientos",
       valueColumn: "codigo",
       labelColumn: "nombre",
       orderBy: "nombre",
       preload: false,
-      defaultLimit: 2000  // Aumentado para incluir todos los establecimientos (hay ~1753)
+      defaultLimit: 2500
     }
   },
   REGION: {
@@ -619,11 +638,26 @@ export const obtenerMesesOcupados = async (anio: number): Promise<number[]> => {
   );
 };
 
+const normalizarFiltroRegiones = (filtroRegion?: string | string[]) => {
+  if (!filtroRegion) {
+    return [] as string[];
+  }
+
+  const lista = Array.isArray(filtroRegion) ? filtroRegion : [filtroRegion];
+  return Array.from(
+    new Set(
+      lista
+        .map((region) => String(region).trim())
+        .filter((region) => /^\d+$/.test(region))
+    )
+  );
+};
+
 export const obtenerValoresDimension = async (
   dimensionId: string,
   busqueda?: string,
   limite?: number,
-  filtroRegion?: string,
+  filtroRegion?: string | string[],
   filtroMunicipio?: string
 ): Promise<Array<{ valor: string | number; etiqueta: string }>> => {
   const dimension = DIMENSIONES[dimensionId];
@@ -634,6 +668,7 @@ export const obtenerValoresDimension = async (
 
   // Si no se especifica límite, usar el defaultLimit de la dimensión o 2000 para ESTABLECIMIENTO
   const limiteFinal = limite ?? (dimensionId === "ESTABLECIMIENTO" ? 2000 : (catalog.defaultLimit ?? 200));
+  const regionesFiltro = normalizarFiltroRegiones(filtroRegion);
   const cacheTtl = catalog.preload || dimensionId === "REGION" || dimensionId === "DEPARTAMENTO" || dimensionId === "MUNICIPIO"
     ? CACHE_TTL.DIMENSION_ESTATICA
     : CACHE_TTL.DIMENSION_DINAMICA;
@@ -642,7 +677,7 @@ export const obtenerValoresDimension = async (
     JSON.stringify({
       busqueda: busqueda?.trim() ?? "",
       limite: limiteFinal,
-      filtroRegion: filtroRegion ?? "",
+      filtroRegion: regionesFiltro.join(","),
       filtroMunicipio: filtroMunicipio ?? ""
     })
   );
@@ -653,17 +688,54 @@ export const obtenerValoresDimension = async (
       const pool = tomarPool();
 
       // Caso especial: MUNICIPIO con filtro de región
-      if (dimensionId === "MUNICIPIO" && filtroRegion) {
-        return obtenerMunicipiosPorRegion(pool, filtroRegion, busqueda, limiteFinal);
+      if (dimensionId === "REGION" && regionesFiltro.length) {
+        const placeholders = regionesFiltro.map(() => "?").join(", ");
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `SELECT codigo AS valor, descripcion AS etiqueta
+           FROM cat_regiones
+           WHERE codigo IN (${placeholders})
+           ORDER BY descripcion`,
+          [...regionesFiltro]
+        );
+        return rows.map((row) => ({ valor: row.valor, etiqueta: row.etiqueta }));
+      }
+
+      if (dimensionId === "DEPARTAMENTO" && regionesFiltro.length) {
+        const placeholders = regionesFiltro.map(() => "?").join(", ");
+        const parametros: Array<string | number> = [...regionesFiltro];
+        let whereBusqueda = "";
+        if (busqueda) {
+          whereBusqueda = " AND dep.D_DEPARTAMENTO LIKE ?";
+          parametros.push(`%${busqueda}%`);
+        }
+        const [rows] = await pool.query<RowDataPacket[]>(
+          `
+            SELECT DISTINCT
+              dep.C_DEPARTAMENTO AS valor,
+              dep.D_DEPARTAMENTO AS etiqueta
+            FROM BAS_BDR_US us
+            INNER JOIN BAS_BDR_DEPARTAMENTOS dep
+              ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+            WHERE us.C_REGION IN (${placeholders})${whereBusqueda}
+            ORDER BY dep.D_DEPARTAMENTO
+            LIMIT ?
+          `,
+          [...parametros, limiteFinal]
+        );
+        return rows.map((row) => ({ valor: row.valor, etiqueta: row.etiqueta }));
+      }
+
+      if (dimensionId === "MUNICIPIO" && regionesFiltro.length) {
+        return obtenerMunicipiosPorRegion(pool, regionesFiltro, busqueda, limiteFinal);
       }
 
       // Caso especial: ESTABLECIMIENTO con filtros
       if (dimensionId === "ESTABLECIMIENTO") {
         if (filtroMunicipio) {
-          return obtenerEstablecimientosPorMunicipio(pool, filtroMunicipio, busqueda, limiteFinal);
+          return obtenerEstablecimientosPorMunicipio(pool, filtroMunicipio, busqueda, limiteFinal, regionesFiltro);
         }
-        if (filtroRegion) {
-          return obtenerEstablecimientosPorRegion(pool, filtroRegion, busqueda, limiteFinal);
+        if (regionesFiltro.length) {
+          return obtenerEstablecimientosPorRegion(pool, regionesFiltro, busqueda, limiteFinal);
         }
       }
 
@@ -705,7 +777,7 @@ export const obtenerValoresDimension = async (
 // Función especial para obtener municipios filtrados por región
 const obtenerMunicipiosPorRegion = async (
   pool: Pool,
-  filtroRegion: string,
+  filtroRegion: string[],
   busqueda?: string,
   limite?: number
 ): Promise<Array<{ valor: string | number; etiqueta: string }>> => {
@@ -713,8 +785,8 @@ const obtenerMunicipiosPorRegion = async (
   const parametros: Array<string | number> = [];
 
   // Filtrar por región
-  condiciones.push("us.C_REGION = ?");
-  parametros.push(filtroRegion);
+  condiciones.push(`us.C_REGION IN (${filtroRegion.map(() => "?").join(", ")})`);
+  parametros.push(...filtroRegion);
 
   // Búsqueda opcional
   if (busqueda) {
@@ -748,8 +820,19 @@ const obtenerEstablecimientosPorMunicipio = async (
   pool: Pool,
   filtroMunicipio: string,
   busqueda?: string,
-  limite?: number
-): Promise<Array<{ valor: string | number; etiqueta: string }>> => {
+  limite?: number,
+  filtroRegiones?: string[]
+): Promise<Array<{
+  valor: string | number;
+  etiqueta: string;
+  nombre?: string;
+  rups?: string;
+  nivel?: string | null;
+  municipio?: string | null;
+  regionCodigo?: number | null;
+  regionNombre?: string | null;
+  activo?: boolean;
+}>> => {
   const condiciones: string[] = [];
   const parametros: Array<string | number> = [];
 
@@ -766,6 +849,11 @@ const obtenerEstablecimientosPorMunicipio = async (
   condiciones.push("us.C_MUNICIPIO = ?");
   parametros.push(Number(departamento), Number(municipio));
 
+  if (filtroRegiones?.length) {
+    condiciones.push(`us.C_REGION IN (${filtroRegiones.map(() => "?").join(", ")})`);
+    parametros.push(...filtroRegiones);
+  }
+
   // Búsqueda opcional
   if (busqueda) {
     const esSoloNumeros = /^\d+$/.test(busqueda.trim());
@@ -786,10 +874,41 @@ const obtenerEstablecimientosPorMunicipio = async (
   const sql = `
     SELECT DISTINCT
       cat.codigo AS valor,
-      COALESCE(cat.nombre, CAST(us.C_US AS CHAR)) AS etiqueta
+      CONCAT(
+        COALESCE(cat.nombre, CAST(us.C_US AS CHAR)),
+        ' (RUPS: ',
+        CAST(us.C_US AS CHAR),
+        ')',
+        CASE
+          WHEN nivel.D_NIVEL_US IS NOT NULL THEN CONCAT(' - ', nivel.D_NIVEL_US)
+          ELSE ''
+        END,
+        CASE
+          WHEN muni.D_MUNICIPIO IS NOT NULL THEN CONCAT(' - ', muni.D_MUNICIPIO)
+          ELSE ''
+        END
+      ) AS etiqueta,
+      COALESCE(cat.nombre, CAST(us.C_US AS CHAR)) AS nombre,
+      CAST(us.C_US AS CHAR) AS rups,
+      nivel.D_NIVEL_US AS nivel,
+      muni.D_MUNICIPIO AS municipio,
+      us.C_REGION AS regionCodigo,
+      reg.descripcion AS regionNombre,
+      CASE
+        WHEN UPPER(COALESCE(us.B_ACTIVA, 'S')) IN ('S', '1', 'SI', 'TRUE', 'T', 'Y', 'YES')
+          THEN 1
+        ELSE 0
+      END AS activo
     FROM cat_establecimientos cat
     INNER JOIN BAS_BDR_US us 
       ON cat.codigo COLLATE utf8mb4_unicode_ci = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+    LEFT JOIN BAS_BDR_NIVELES_US nivel
+      ON nivel.C_NIVEL_US = us.C_NIVEL_US
+    LEFT JOIN BAS_BDR_MUNICIPIOS muni
+      ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+     AND muni.C_MUNICIPIO = us.C_MUNICIPIO
+    LEFT JOIN cat_regiones reg
+      ON reg.codigo = us.C_REGION
     ${whereClause}
     ORDER BY etiqueta
     LIMIT ?
@@ -797,22 +916,42 @@ const obtenerEstablecimientosPorMunicipio = async (
   parametros.push(limiteFinal);
 
   const [rows] = await pool.query<RowDataPacket[]>(sql, parametros);
-  return rows.map((row: RowDataPacket) => ({ valor: row.valor, etiqueta: row.etiqueta }));
+  return rows.map((row: RowDataPacket) => ({
+    valor: row.valor,
+    etiqueta: row.etiqueta,
+    nombre: row.nombre,
+    rups: row.rups,
+    nivel: row.nivel,
+    municipio: row.municipio,
+    regionCodigo: row.regionCodigo === null || row.regionCodigo === undefined ? null : Number(row.regionCodigo),
+    regionNombre: row.regionNombre,
+    activo: Boolean(Number(row.activo ?? 1))
+  }));
 };
 
 // Función especial para obtener establecimientos filtrados por región
 const obtenerEstablecimientosPorRegion = async (
   pool: Pool,
-  filtroRegion: string,
+  filtroRegion: string[],
   busqueda?: string,
   limite?: number
-): Promise<Array<{ valor: string | number; etiqueta: string }>> => {
+): Promise<Array<{
+  valor: string | number;
+  etiqueta: string;
+  nombre?: string;
+  rups?: string;
+  nivel?: string | null;
+  municipio?: string | null;
+  regionCodigo?: number | null;
+  regionNombre?: string | null;
+  activo?: boolean;
+}>> => {
   const condiciones: string[] = [];
   const parametros: Array<string | number> = [];
 
   // Filtrar por región
-  condiciones.push("us.C_REGION = ?");
-  parametros.push(filtroRegion);
+  condiciones.push(`us.C_REGION IN (${filtroRegion.map(() => "?").join(", ")})`);
+  parametros.push(...filtroRegion);
 
   // Búsqueda opcional
   if (busqueda) {
@@ -834,10 +973,41 @@ const obtenerEstablecimientosPorRegion = async (
   const sql = `
     SELECT DISTINCT
       cat.codigo AS valor,
-      COALESCE(cat.nombre, CAST(us.C_US AS CHAR)) AS etiqueta
+      CONCAT(
+        COALESCE(cat.nombre, CAST(us.C_US AS CHAR)),
+        ' (RUPS: ',
+        CAST(us.C_US AS CHAR),
+        ')',
+        CASE
+          WHEN nivel.D_NIVEL_US IS NOT NULL THEN CONCAT(' - ', nivel.D_NIVEL_US)
+          ELSE ''
+        END,
+        CASE
+          WHEN muni.D_MUNICIPIO IS NOT NULL THEN CONCAT(' - ', muni.D_MUNICIPIO)
+          ELSE ''
+        END
+      ) AS etiqueta,
+      COALESCE(cat.nombre, CAST(us.C_US AS CHAR)) AS nombre,
+      CAST(us.C_US AS CHAR) AS rups,
+      nivel.D_NIVEL_US AS nivel,
+      muni.D_MUNICIPIO AS municipio,
+      us.C_REGION AS regionCodigo,
+      reg.descripcion AS regionNombre,
+      CASE
+        WHEN UPPER(COALESCE(us.B_ACTIVA, 'S')) IN ('S', '1', 'SI', 'TRUE', 'T', 'Y', 'YES')
+          THEN 1
+        ELSE 0
+      END AS activo
     FROM cat_establecimientos cat
     INNER JOIN BAS_BDR_US us 
       ON cat.codigo COLLATE utf8mb4_unicode_ci = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+    LEFT JOIN BAS_BDR_NIVELES_US nivel
+      ON nivel.C_NIVEL_US = us.C_NIVEL_US
+    LEFT JOIN BAS_BDR_MUNICIPIOS muni
+      ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+     AND muni.C_MUNICIPIO = us.C_MUNICIPIO
+    LEFT JOIN cat_regiones reg
+      ON reg.codigo = us.C_REGION
     ${whereClause}
     ORDER BY etiqueta
     LIMIT ?
@@ -845,7 +1015,17 @@ const obtenerEstablecimientosPorRegion = async (
   parametros.push(limiteFinal);
 
   const [rows] = await pool.query<RowDataPacket[]>(sql, parametros);
-  return rows.map((row: RowDataPacket) => ({ valor: row.valor, etiqueta: row.etiqueta }));
+  return rows.map((row: RowDataPacket) => ({
+    valor: row.valor,
+    etiqueta: row.etiqueta,
+    nombre: row.nombre,
+    rups: row.rups,
+    nivel: row.nivel,
+    municipio: row.municipio,
+    regionCodigo: row.regionCodigo === null || row.regionCodigo === undefined ? null : Number(row.regionCodigo),
+    regionNombre: row.regionNombre,
+    activo: Boolean(Number(row.activo ?? 1))
+  }));
 };
 
 const normalizarValoresFiltro = (dimension: DimensionDefinition, valores?: Array<string | number>) => {

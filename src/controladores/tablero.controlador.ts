@@ -5,6 +5,7 @@ import {
   obtenerResumenTablero
 } from "../servicios/tablero.servicio";
 import { obtenerAniosDisponibles } from "../servicios/pivot.servicio";
+import { AlcanceRegionalError, obtenerRegionesPermitidasUsuario } from "../utilidades/alcance-regional.util";
 import { logger } from "../utilidades/registro.utilidad";
 
 export const obtenerResumenControlador = async (
@@ -23,13 +24,20 @@ export const obtenerResumenControlador = async (
       });
     }
 
-    const resumen = await obtenerResumenTablero(anioNumero);
+    const regionesPermitidas = obtenerRegionesPermitidasUsuario(request.usuarioActual);
+    const resumen = await obtenerResumenTablero(anioNumero, regionesPermitidas);
 
     return reply.status(200).send({
       datos: resumen,
       generadoEn: new Date().toISOString()
     });
   } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message
+      });
+    }
     logger.error("Error al obtener resumen del tablero", error);
     throw error;
   }
@@ -40,13 +48,20 @@ export const obtenerMapaHondurasControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    const datos = await obtenerDatosMapaHonduras();
+    const regionesPermitidas = obtenerRegionesPermitidasUsuario(request.usuarioActual);
+    const datos = await obtenerDatosMapaHonduras(regionesPermitidas);
 
     return reply.status(200).send({
       datos,
       generadoEn: new Date().toISOString()
     });
   } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message
+      });
+    }
     logger.error("Error al obtener datos del mapa Honduras", error);
     throw error;
   }

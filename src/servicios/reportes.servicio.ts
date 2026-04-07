@@ -10,7 +10,7 @@ export interface IndicadoresMunicipalesParams {
   anio: number;
   departamentoId: number;
   limite: number;
-  regionId?: number;
+  regionIds?: number[];
 }
 
 export interface IndicadoresMunicipalesTotales {
@@ -27,8 +27,8 @@ const REPORTES_CACHE_TTL = CACHE_TTL.RESUMEN_TABLERO; // 5 minutos
 export const obtenerIndicadoresMunicipales = async (
   params: IndicadoresMunicipalesParams
 ): Promise<IndicadoresMunicipalesTotales> => {
-  const { anio, departamentoId, regionId } = params;
-  const cacheKey = `reportes:indicadores:${anio}-${departamentoId}-${regionId ?? "all"}`;
+  const { anio, departamentoId, regionIds } = params;
+  const cacheKey = `reportes:indicadores:${anio}-${departamentoId}-${regionIds?.join(",") ?? "all"}`;
 
   return cache.getOrSet(
     cacheKey,
@@ -37,9 +37,9 @@ export const obtenerIndicadoresMunicipales = async (
       let condicionRegion = "";
       const parametros: any[] = [departamentoId];
 
-      if (regionId !== undefined && regionId !== null) {
-        condicionRegion = "AND C_REGION = ?";
-        parametros.push(regionId);
+      if (regionIds?.length) {
+        condicionRegion = `AND C_REGION IN (${regionIds.map(() => "?").join(", ")})`;
+        parametros.push(...regionIds);
       } else {
         const esCortes = departamentoId === 5;
         if (esCortes) {

@@ -12,6 +12,15 @@ import { logger } from "./utilidades/registro.utilidad";
 
 const normalizarOrigen = (origen: string) => origen.trim().replace(/\/$/, "").toLowerCase();
 
+const esOrigenLocalDesarrollo = (origin: string) => {
+  try {
+    const url = new URL(origin);
+    return ["localhost", "127.0.0.1"].includes(url.hostname);
+  } catch (_error) {
+    return false;
+  }
+};
+
 export const buildApp = async () => {
   const app = Fastify({
     logger: true,
@@ -27,6 +36,7 @@ export const buildApp = async () => {
   });
 
   await app.register(fastifyCors, {
+    credentials: true,
     origin: (origin, callback) => {
       if (!origin) {
         callback(null, true);
@@ -42,6 +52,11 @@ export const buildApp = async () => {
       const permitido = origenesPermitidos
         .map(normalizarOrigen)
         .includes(normalizarOrigen(origin));
+
+      if (!permitido && !entorno.esProduccion && esOrigenLocalDesarrollo(origin)) {
+        callback(null, true);
+        return;
+      }
 
       callback(null, permitido);
     }

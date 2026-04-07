@@ -292,13 +292,18 @@ const obtenerAniosSolicitados = (payload: EgresosPivotPayload): number[] => {
   ).sort((a, b) => a - b);
 };
 
-const construirWhere = (payload: EgresosPivotPayload, anios: number[]) => {
+const construirWhere = (payload: EgresosPivotPayload, anios: number[], regionIds?: number[] | null) => {
   const whereParts: string[] = [];
   const whereParams: Array<string | number> = [];
 
   if (anios.length > 0) {
     whereParts.push(`g.N_ANIO IN (${anios.map(() => "?").join(",")})`);
     whereParams.push(...anios);
+  }
+
+  if (regionIds?.length) {
+    whereParts.push(`us.C_REGION IN (${regionIds.map(() => "?").join(",")})`);
+    whereParams.push(...regionIds);
   }
 
   for (const filter of payload.filters ?? []) {
@@ -371,7 +376,8 @@ export const obtenerCatalogoEgresos = async () => {
 export const obtenerValoresDimensionEgresos = async (
   dimensionId: string,
   busqueda?: string,
-  limite?: number
+  limite?: number,
+  regionIds?: number[] | null
 ): Promise<Array<{ valor: number | string; etiqueta: string }>> => {
   const dimension = obtenerDimension(dimensionId);
   if (!dimension) return [];
@@ -380,9 +386,18 @@ export const obtenerValoresDimensionEgresos = async (
   let sql = `SELECT DISTINCT ${dimension.column} AS valor ${BASE_FROM}`;
   const params: Array<string | number> = [];
 
+  const whereParts: string[] = [];
+  if (regionIds?.length) {
+    whereParts.push(`us.C_REGION IN (${regionIds.map(() => "?").join(",")})`);
+    params.push(...regionIds);
+  }
   if (busqueda?.trim()) {
-    sql += ` WHERE CAST(${dimension.column} AS CHAR) LIKE ?`;
+    whereParts.push(`CAST(${dimension.column} AS CHAR) LIKE ?`);
     params.push(`%${busqueda.trim()}%`);
+  }
+
+  if (whereParts.length) {
+    sql += ` WHERE ${whereParts.join(" AND ")}`;
   }
 
   sql += ` ORDER BY ${dimension.column}`;
@@ -412,7 +427,8 @@ export interface EgresosPivotPayload {
 }
 
 export const ejecutarConsultaEgresos = async (
-  payload: EgresosPivotPayload
+  payload: EgresosPivotPayload,
+  regionIds?: number[] | null
 ): Promise<{
   datos: Array<Record<string, unknown>>;
   totalGeneral: Record<string, unknown> | null;
@@ -447,7 +463,7 @@ export const ejecutarConsultaEgresos = async (
     ...medidasSel.map((measure) => `${measure.expression} AS \`${measure.label}\``),
   ];
 
-  const { whereClause, whereParams } = construirWhere(payload, aniosConsultados);
+  const { whereClause, whereParams } = construirWhere(payload, aniosConsultados, regionIds);
   const sqlParts = [`SELECT ${selectParts.join(", ")}`, BASE_FROM, whereClause];
 
   if (allDims.length > 0) {
@@ -491,8 +507,11 @@ export const ejecutarConsultaEgresos = async (
   };
 };
 
-export const obtenerResumenEgresos = async () => {
+export const obtenerResumenEgresos = async (regionIds?: number[] | null) => {
   const pool = tomarPool();
+  const whereClause = regionIds?.length
+    ? `WHERE us.C_REGION IN (${regionIds.map(() => "?").join(",")})`
+    : "";
   const [rows] = await pool.query<RowDataPacket[]>(
     `
       SELECT
@@ -503,9 +522,11 @@ export const obtenerResumenEgresos = async () => {
         SUM(COALESCE(op.total_operaciones, 0)) AS total_operaciones,
         SUM(COALESCE(pt.total_partos, 0)) AS total_partos
       ${BASE_FROM}
+      ${whereClause}
       GROUP BY g.N_ANIO
       ORDER BY g.N_ANIO
-    `
+    `,
+    [...(regionIds ?? [])]
   );
 
   return rows.map((row) =>

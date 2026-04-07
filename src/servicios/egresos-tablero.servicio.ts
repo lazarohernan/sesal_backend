@@ -15,7 +15,7 @@ export interface EgresosDepartamentoDato {
 
 export interface EgresosIndicadoresDepartamentoParams {
   departamentoId: number;
-  regionId?: number;
+  regionIds?: number[];
   anio?: number;
 }
 
@@ -39,9 +39,9 @@ const construirFiltroUbicacion = (params: EgresosIndicadoresDepartamentoParams) 
   const whereParts = ["us.C_DEPARTAMENTO = ?"];
   const values: number[] = [params.departamentoId];
 
-  if (params.regionId !== undefined) {
-    whereParts.push("us.C_REGION = ?");
-    values.push(params.regionId);
+  if (params.regionIds?.length) {
+    whereParts.push(`us.C_REGION IN (${params.regionIds.map(() => "?").join(", ")})`);
+    values.push(...params.regionIds);
   }
 
   if (params.anio !== undefined) {
@@ -74,7 +74,43 @@ export const obtenerAniosEgresosTablero = async (): Promise<number[]> => {
   );
 };
 
-export const obtenerDatosMapaHondurasEgresos = async (): Promise<EgresosDepartamentoDato[]> => {
+export const obtenerDatosMapaHondurasEgresos = async (regionIds?: number[] | null): Promise<EgresosDepartamentoDato[]> => {
+  if (regionIds?.length) {
+    const pool = obtenerPoolActual();
+    const placeholders = regionIds.map(() => "?").join(", ");
+    const [rows] = await pool.query<RowDataPacket[]>(
+      `
+        SELECT
+          us.C_DEPARTAMENTO AS departamentoId,
+          dep.D_DEPARTAMENTO AS nombre,
+          COUNT(*) AS totalHistorico,
+          SUM(CASE WHEN g.N_ANIO = 2025 THEN 1 ELSE 0 END) AS total2025,
+          SUM(CASE WHEN g.N_ANIO = 2024 THEN 1 ELSE 0 END) AS total2024,
+          SUM(CASE WHEN g.N_ANIO = 2023 THEN 1 ELSE 0 END) AS total2023,
+          COUNT(DISTINCT g.C_US) AS totalUnidades
+        FROM ${TABLA_GENERAL} g
+        INNER JOIN ${TABLA_US} us
+          ON us.C_US = g.C_US
+        INNER JOIN ${TABLA_DEPARTAMENTOS} dep
+          ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+        WHERE us.C_REGION IN (${placeholders})
+        GROUP BY us.C_DEPARTAMENTO, dep.D_DEPARTAMENTO
+        ORDER BY us.C_DEPARTAMENTO
+      `,
+      [...regionIds]
+    );
+
+    return rows.map((row) => ({
+      departamentoId: Number(row.departamentoId),
+      nombre: String(row.nombre),
+      totalHistorico: Number(row.totalHistorico ?? 0),
+      total2025: Number(row.total2025 ?? 0),
+      total2024: Number(row.total2024 ?? 0),
+      total2023: Number(row.total2023 ?? 0),
+      totalUnidades: Number(row.totalUnidades ?? 0),
+    }));
+  }
+
   return cache.getOrSet(
     "egresos-tablero:mapa",
     async () => {
@@ -156,7 +192,7 @@ export const obtenerDatosMapaHondurasEgresos = async (): Promise<EgresosDepartam
 export const obtenerIndicadoresDepartamentoEgresos = async (
   params: EgresosIndicadoresDepartamentoParams
 ): Promise<EgresosIndicadoresDepartamento> => {
-  const cacheKey = `egresos-tablero:indicadores:${params.departamentoId}:${params.regionId ?? "all"}:${params.anio ?? "all"}`;
+  const cacheKey = `egresos-tablero:indicadores:${params.departamentoId}:${params.regionIds?.join(",") ?? "all"}:${params.anio ?? "all"}`;
 
   return cache.getOrSet(
     cacheKey,

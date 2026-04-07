@@ -35,6 +35,17 @@ export const entorno = {
   admin: {
     token: (process.env.ADMIN_TOKEN ?? process.env.API_ADMIN_TOKEN ?? "").trim()
   },
+  auth: {
+    cookieName: (process.env.AUTH_COOKIE_NAME ?? "bi_sesal_session").trim(),
+    sessionTtlHours: Math.max(1, numero(process.env.AUTH_SESSION_TTL_HOURS, 12)),
+    sessionRememberDays: Math.max(1, numero(process.env.AUTH_SESSION_REMEMBER_DAYS, 30)),
+    secureCookies: booleano(process.env.AUTH_SECURE_COOKIE, process.env.NODE_ENV === "production"),
+    bootstrapUsername: (process.env.AUTH_BOOTSTRAP_USERNAME ?? "admin").trim(),
+    bootstrapEmail: (process.env.AUTH_BOOTSTRAP_EMAIL ?? "admin@local.test").trim(),
+    bootstrapPassword: (process.env.AUTH_BOOTSTRAP_PASSWORD ?? "").trim(),
+    resetTtlMinutes: Math.max(5, numero(process.env.AUTH_RESET_TTL_MINUTES, 30)),
+    resetBaseUrl: (process.env.AUTH_RESET_BASE_URL ?? "http://localhost:3001/recuperar-password").trim()
+  },
   baseDatos: {
     host: process.env.MYSQL_HOST ?? process.env.DB_HOST ?? "localhost",
     puerto: numero(process.env.MYSQL_PORT ?? process.env.DB_PORT, 3306),
