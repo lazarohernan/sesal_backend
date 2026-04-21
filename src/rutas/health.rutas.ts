@@ -1,6 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
 import { pool } from "../base_datos/pool";
-import { obtenerEstadisticasQueries } from "../utilidades/query-logging.utilidad";
 import { entorno } from "../configuracion/entorno";
 import { cache } from "../utilidades/cache.utilidad";
 import { requireAdminAccess } from "../middleware/admin.middleware";
@@ -67,7 +66,6 @@ const healthRutas: FastifyPluginAsync = async (fastify) => {
   // Endpoint de monitoreo con metricas del sistema
   fastify.get("/metrics", { preHandler: requireAdminAccess }, async (_request, reply) => {
     try {
-      const stats = obtenerEstadisticasQueries();
       const memUsage = process.memoryUsage();
 
       // Obtener estadisticas del pool si esta disponible
@@ -94,16 +92,6 @@ const healthRutas: FastifyPluginAsync = async (fastify) => {
         database: {
           poolLimit: entorno.baseDatos.maximoConexiones,
           poolStats: poolStats
-        },
-        queries: {
-          slowQueries: stats.totalSlowQueries,
-          avgDuration: stats.promedioDuracion,
-          maxDuration: stats.maxDuracion,
-          recentSlowQueries: stats.queriesRecientes.map((q: { duration: number; sql: string; timestamp: Date }) => ({
-            duration: q.duration,
-            sql: q.sql.substring(0, 150),
-            timestamp: q.timestamp.toISOString()
-          }))
         },
         cache: {
           ...cache.getStats({ maxKeys: 50 }),

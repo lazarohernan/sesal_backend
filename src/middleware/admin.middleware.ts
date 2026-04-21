@@ -3,6 +3,14 @@ import type { FastifyRequest, FastifyReply } from "fastify";
 
 import { entorno } from "../configuracion";
 
+const accesoDenegado = (reply: FastifyReply, requestId: string, mensaje: string) =>
+  reply.status(403).send({
+    status: 403,
+    codigo: "ACCESO_DENEGADO",
+    mensaje,
+    requestId
+  });
+
 const tokenInvalido = (reply: FastifyReply, requestId: string) =>
   reply.status(401).send({
     status: 401,
@@ -37,6 +45,18 @@ const compararTokens = (esperado: string, recibido: string): boolean => {
 };
 
 export const requireAdminAccess = async (request: FastifyRequest, reply: FastifyReply) => {
+  if (!request.usuarioActual) {
+    return tokenInvalido(reply, request.id);
+  }
+
+  if (request.usuarioActual.rol !== "central") {
+    return accesoDenegado(
+      reply,
+      request.id,
+      "Solo los usuarios con rol central pueden acceder a rutas administrativas."
+    );
+  }
+
   const tokenConfigurado = entorno.admin.token;
 
   if (!tokenConfigurado) {

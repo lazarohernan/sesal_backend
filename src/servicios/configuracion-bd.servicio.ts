@@ -1,4 +1,5 @@
-import mysql from "mysql2/promise";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 
 import { entorno } from "../configuracion/entorno";
@@ -6,6 +7,7 @@ import {
   eliminarConfiguracionPersistida,
   guardarConfiguracionPersistida,
   leerConfiguracionPersistida,
+  obtenerDirectorioConfiguracion,
   type ConfiguracionPersistida
 } from "../utilidades/configuracion-archivo.utilidad";
 
@@ -18,9 +20,87 @@ export interface DatabaseConfig {
   ssl: boolean;
 }
 
-const encryptPassword = (password: string): string => Buffer.from(password, "utf8").toString("base64");
-const decryptPassword = (passwordEncrypted: string): string =>
-  Buffer.from(passwordEncrypted, "base64").toString("utf8");
+const CONFIG_KEY_FILE = path.join(obtenerDirectorioConfiguracion(), "config.key");
+const CONFIG_KEY_FILE_MODE = 0o600;
+const PASSWORD_ENCRYPTION_VERSION = "aes-256-gcm:v1";
+const PASSWORD_LEGACY_ENCODING = "legacy-base64";
+
+const derivarClave = (material: Buffer | string) =>
+  scryptSync(material, "bi-sesal-db-config", 32);
+
+const obtenerClavePersistencia = async () => {
+  const secretDesdeEntorno = process.env.APP_CONFIG_SECRET?.trim();
+  if (secretDesdeEntorno) {
+    return derivarClave(secretDesdeEntorno);
+  }
+
+  await fs.mkdir(obtenerDirectorioConfiguracion(), { recursive: true, mode: 0o700 });
+  await fs.chmod(obtenerDirectorioConfiguracion(), 0o700).catch(() => undefined);
+
+  try {
+    const existente = await fs.readFile(CONFIG_KEY_FILE, "utf8");
+    return derivarClave(Buffer.from(existente.trim(), "base64"));
+  } catch (error: unknown) {
+    const errorCode = typeof error === "object" && error && "code" in error
+      ? String((error as { code?: string }).code)
+      : "";
+    if (errorCode !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const nuevaClave = randomBytes(32);
+  await fs.writeFile(CONFIG_KEY_FILE, nuevaClave.toString("base64"), {
+    encoding: "utf8",
+    mode: CONFIG_KEY_FILE_MODE
+  });
+  await fs.chmod(CONFIG_KEY_FILE, CONFIG_KEY_FILE_MODE).catch(() => undefined);
+  return derivarClave(nuevaClave);
+};
+
+const encryptPassword = async (password: string): Promise<string> => {
+  const key = await obtenerClavePersistencia();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(password, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return [
+    PASSWORD_ENCRYPTION_VERSION,
+    iv.toString("base64"),
+    tag.toString("base64"),
+    encrypted.toString("base64")
+  ].join(":");
+};
+
+const decryptPassword = async (passwordEncrypted: string): Promise<string> => {
+  if (passwordEncrypted.startsWith(`${PASSWORD_ENCRYPTION_VERSION}:`)) {
+    const payload = passwordEncrypted.slice(PASSWORD_ENCRYPTION_VERSION.length + 1);
+    const [ivBase64, tagBase64, encryptedBase64] = payload.split(":");
+    if (!ivBase64 || !tagBase64 || !encryptedBase64) {
+      throw new Error("La configuración cifrada de base de datos está incompleta.");
+    }
+
+    const key = await obtenerClavePersistencia();
+    const decipher = createDecipheriv(
+      "aes-256-gcm",
+      key,
+      Buffer.from(ivBase64, "base64")
+    );
+    decipher.setAuthTag(Buffer.from(tagBase64, "base64"));
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(encryptedBase64, "base64")),
+      decipher.final()
+    ]);
+    return decrypted.toString("utf8");
+  }
+
+  if (passwordEncrypted.startsWith(`${PASSWORD_LEGACY_ENCODING}:`)) {
+    return Buffer.from(passwordEncrypted.slice(PASSWORD_LEGACY_ENCODING.length + 1), "base64").toString("utf8");
+  }
+
+  return Buffer.from(passwordEncrypted, "base64").toString("utf8");
+};
 
 const normalizarConfig = (config: DatabaseConfig): DatabaseConfig => ({
   host: config.host.trim(),
@@ -34,7 +114,6 @@ const normalizarConfig = (config: DatabaseConfig): DatabaseConfig => ({
 class ConfiguracionBDServicio {
   private configuracionPersonalizada: DatabaseConfig | null = null;
   private persistenciaCargada = false;
-  private readonly contextoId = path.basename(process.cwd());
 
   private obtenerConfigPorDefecto(): DatabaseConfig {
     return {
@@ -58,7 +137,7 @@ class ConfiguracionBDServicio {
         username: guardada.username,
         database: guardada.database,
         ssl: guardada.ssl,
-        password: decryptPassword(guardada.passwordEncrypted)
+        password: await decryptPassword(guardada.passwordEncrypted)
       };
     }
   }
@@ -82,19 +161,16 @@ class ConfiguracionBDServicio {
       username: config.username,
       database: config.database,
       ssl: Boolean(config.ssl),
-      passwordEncrypted: encryptPassword(config.password),
+      passwordEncrypted: await encryptPassword(config.password),
       updatedAt: new Date().toISOString()
     };
     await guardarConfiguracionPersistida(payload);
   }
 
-  setConfiguracionPersonalizada(config: DatabaseConfig | null) {
-    this.configuracionPersonalizada = config ? normalizarConfig(config) : null;
-  }
-
   async actualizarConfiguracion(config: DatabaseConfig) {
-    this.setConfiguracionPersonalizada(config);
-    await this.persistirConfiguracion(config);
+    const normalizada = normalizarConfig(config);
+    await this.persistirConfiguracion(normalizada);
+    this.configuracionPersonalizada = normalizada;
   }
 
   limpiarConfiguracionPersonalizada() {
@@ -102,25 +178,8 @@ class ConfiguracionBDServicio {
   }
 
   async limpiarConfiguracionPersistida() {
-    this.limpiarConfiguracionPersonalizada();
     await this.persistirConfiguracion(null);
-  }
-
-  estaUsandoConfiguracionPersonalizada(): boolean {
-    return this.configuracionPersonalizada !== null;
-  }
-
-  obtenerInfoConfiguracion() {
-    const config = this.obtenerConfiguracion();
-    return {
-      host: config.host,
-      port: config.port,
-      database: config.database,
-      ssl: config.ssl,
-      esPersonalizada: this.estaUsandoConfiguracionPersonalizada(),
-      contextoId: this.contextoId,
-      timestamp: new Date().toISOString()
-    };
+    this.limpiarConfiguracionPersonalizada();
   }
 
   obtenerConfiguracionPersistidaSanitizada() {
@@ -131,47 +190,6 @@ class ConfiguracionBDServicio {
       ssl: Boolean(resto.ssl),
       tienePassword: Boolean(password)
     };
-  }
-
-  crearPool() {
-    const config = this.obtenerConfiguracion();
-    const normalizado = normalizarConfig(config);
-    return mysql.createPool({
-      host: normalizado.host,
-      port: normalizado.port,
-      user: normalizado.username,
-      password: normalizado.password,
-      database: normalizado.database,
-      ssl: normalizado.ssl
-        ? {
-            rejectUnauthorized: false
-          }
-        : undefined,
-      waitForConnections: true,
-      connectionLimit: entorno.baseDatos.maximoConexiones,
-      queueLimit: entorno.baseDatos.limiteCola,
-      connectTimeout: entorno.baseDatos.tiempoEsperaConexion,
-      charset: entorno.baseDatos.conjuntoCaracteres
-    });
-  }
-
-  async crearConexion() {
-    const config = this.obtenerConfiguracion();
-    const normalizado = normalizarConfig(config);
-    return mysql.createConnection({
-      host: normalizado.host,
-      port: normalizado.port,
-      user: normalizado.username,
-      password: normalizado.password,
-      database: normalizado.database,
-      ssl: normalizado.ssl
-        ? {
-            rejectUnauthorized: false
-          }
-        : undefined,
-      connectTimeout: entorno.baseDatos.tiempoEsperaConexion,
-      charset: entorno.baseDatos.conjuntoCaracteres
-    });
   }
 }
 

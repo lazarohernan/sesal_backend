@@ -5,9 +5,6 @@ import { configuracionBDServicio } from "../servicios/configuracion-bd.servicio"
 
 export let pool: mysql.Pool | null = null;
 
-// Timeout para queries (5 minutos por defecto para consultas grandes, configurable)
-const QUERY_TIMEOUT_MS = Number(process.env.MYSQL_QUERY_TIMEOUT) || 300_000;
-
 const crearNuevoPool = () => {
   const config = configuracionBDServicio.obtenerConfiguracion();
   return mysql.createPool({
@@ -32,33 +29,6 @@ const crearNuevoPool = () => {
     enableKeepAlive: true,
     keepAliveInitialDelay: 10000
   });
-};
-
-/**
- * Ejecuta una query con timeout.
- * Si la query tarda más del timeout, se cancela automáticamente.
- */
-export const queryWithTimeout = async <T>(
-  sql: string,
-  params?: unknown[],
-  timeoutMs: number = QUERY_TIMEOUT_MS
-): Promise<T> => {
-  const currentPool = obtenerPoolActual();
-  
-  let timer: NodeJS.Timeout;
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`Query timeout después de ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-
-  try {
-    const result = await Promise.race([currentPool.query(sql, params), timeoutPromise]);
-    return result as T;
-  } finally {
-    clearTimeout(timer!);
-  }
 };
 
 export const inicializarPool = async () => {

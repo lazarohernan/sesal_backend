@@ -15,6 +15,8 @@ interface CrearUsuarioRegionalBody {
   email?: string;
   passwordTemporal?: string;
   regiones?: unknown;
+  establecimientos?: unknown;
+  puedeVerSeguimiento?: boolean;
 }
 
 interface ActualizarUsuarioRegionalBody {
@@ -23,6 +25,8 @@ interface ActualizarUsuarioRegionalBody {
   email?: string;
   estado?: string;
   regiones?: unknown;
+  establecimientos?: unknown;
+  puedeVerSeguimiento?: boolean;
 }
 
 interface CambiarEstadoUsuarioBody {
@@ -69,6 +73,8 @@ export const crearUsuarioRegionalControlador = async (
   const email = request.body?.email?.trim() ?? "";
   const passwordTemporal = request.body?.passwordTemporal?.trim() ?? "";
   const regiones = extraerRegiones(request.body?.regiones);
+  const establecimientos = extraerRegiones(request.body?.establecimientos);
+  const puedeVerSeguimiento = request.body?.puedeVerSeguimiento === true;
 
   if (!nombre || !username || !email || !passwordTemporal || regiones.length === 0) {
     return responderError(
@@ -85,7 +91,9 @@ export const crearUsuarioRegionalControlador = async (
       username,
       email,
       passwordTemporal,
-      regiones
+      regiones,
+      establecimientos,
+      puedeVerSeguimiento
     } satisfies CrearUsuarioRegionalInput);
 
     return reply.status(201).send({
@@ -112,6 +120,8 @@ export const actualizarUsuarioRegionalControlador = async (
   const email = request.body?.email?.trim() ?? "";
   const estado = request.body?.estado === "inactivo" ? "inactivo" : "activo";
   const regiones = extraerRegiones(request.body?.regiones);
+  const establecimientos = extraerRegiones(request.body?.establecimientos);
+  const puedeVerSeguimiento = request.body?.puedeVerSeguimiento === true;
 
   if (!Number.isInteger(id) || id <= 0 || !nombre || !username || !email || regiones.length === 0) {
     return responderError(
@@ -129,7 +139,9 @@ export const actualizarUsuarioRegionalControlador = async (
       username,
       email,
       estado,
-      regiones
+      regiones,
+      establecimientos,
+      puedeVerSeguimiento
     } satisfies ActualizarUsuarioRegionalInput);
 
     return reply.send({

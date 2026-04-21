@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 import { obtenerPoolActual } from "../base_datos/pool";
@@ -15,6 +16,8 @@ export interface UsuarioGestionado {
   activo: boolean;
   estado: "activo" | "inactivo";
   regiones: string[];
+  establecimientos: string[];
+  puedeVerSeguimiento: boolean;
   ultimoAcceso: string;
   creadoEn: string;
   actualizadoEn: string;
@@ -28,6 +31,8 @@ interface UsuarioGestionRow extends RowDataPacket {
   rol: string;
   activo: number | boolean;
   regiones_json: string | string[] | null;
+  establecimientos_json: string | string[] | null;
+  puede_ver_seguimiento: number | boolean;
   ultimo_login_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
@@ -39,6 +44,8 @@ export interface CrearUsuarioRegionalInput {
   email: string;
   passwordTemporal?: string;
   regiones: string[];
+  establecimientos?: string[];
+  puedeVerSeguimiento?: boolean;
 }
 
 export interface CrearUsuarioRegionalResultado {
@@ -53,6 +60,8 @@ export interface ActualizarUsuarioRegionalInput {
   email: string;
   estado: "activo" | "inactivo";
   regiones: string[];
+  establecimientos?: string[];
+  puedeVerSeguimiento?: boolean;
 }
 
 export interface CambiarEstadoUsuarioInput {
@@ -71,14 +80,32 @@ export interface ResetearPasswordUsuarioResultado {
 }
 
 const generarPasswordTemporal = () => {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*";
-  let password = "";
+  const grupos = {
+    mayusculas: "ABCDEFGHJKLMNPQRSTUVWXYZ",
+    minusculas: "abcdefghijkmnopqrstuvwxyz",
+    numeros: "23456789",
+    especiales: "!@#$%&*"
+  };
+  const todos = Object.values(grupos).join("");
+  const seleccionar = (charset: string) => charset[randomInt(0, charset.length)] ?? "";
 
-  for (let i = 0; i < 12; i += 1) {
-    password += chars[Math.floor(Math.random() * chars.length)];
+  const caracteres = [
+    seleccionar(grupos.mayusculas),
+    seleccionar(grupos.minusculas),
+    seleccionar(grupos.numeros),
+    seleccionar(grupos.especiales)
+  ];
+
+  while (caracteres.length < 12) {
+    caracteres.push(seleccionar(todos));
   }
 
-  return password;
+  for (let i = caracteres.length - 1; i > 0; i -= 1) {
+    const j = randomInt(0, i + 1);
+    [caracteres[i], caracteres[j]] = [caracteres[j]!, caracteres[i]!];
+  }
+
+  return caracteres.join("");
 };
 
 const normalizarRegiones = (raw: string | string[] | null) => {
@@ -120,6 +147,8 @@ const mapearUsuario = (row: UsuarioGestionRow): UsuarioGestionado => ({
   activo: Boolean(row.activo),
   estado: Boolean(row.activo) ? "activo" : "inactivo",
   regiones: normalizarRegiones(row.regiones_json),
+  establecimientos: normalizarRegiones(row.establecimientos_json),
+  puedeVerSeguimiento: Boolean(row.puede_ver_seguimiento),
   ultimoAcceso: normalizarFecha(row.ultimo_login_at) || "Sin ingreso",
   creadoEn: normalizarFecha(row.created_at),
   actualizadoEn: normalizarFecha(row.updated_at)
@@ -128,27 +157,63 @@ const mapearUsuario = (row: UsuarioGestionRow): UsuarioGestionado => ({
 const esErrorDuplicado = (error: unknown) =>
   Boolean(error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ER_DUP_ENTRY");
 
+const SELECT_USUARIO = `
+  SELECT
+    id,
+    username,
+    email,
+    nombre_mostrar,
+    rol,
+    activo,
+    regiones_json,
+    establecimientos_json,
+    puede_ver_seguimiento,
+    ultimo_login_at,
+    created_at,
+    updated_at
+  FROM ${TABLA_USUARIOS}
+`;
+
 export class UsuariosServicio {
+  private estructuraAsegurada = false;
+
+  private async asegurarEstructura() {
+    if (this.estructuraAsegurada) {
+      return;
+    }
+
+    const pool = obtenerPoolActual();
+    const [columnas] = await pool.query<RowDataPacket[]>(
+      `
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND COLUMN_NAME = 'puede_ver_seguimiento'
+        LIMIT 1
+      `,
+      [TABLA_USUARIOS]
+    );
+
+    if (!columnas.length) {
+      await pool.query(
+        `
+          ALTER TABLE ${TABLA_USUARIOS}
+          ADD COLUMN puede_ver_seguimiento TINYINT(1) NOT NULL DEFAULT 0
+          AFTER establecimientos_json
+        `
+      );
+    }
+
+    this.estructuraAsegurada = true;
+  }
+
   private async obtenerUsuarioPorId(id: number): Promise<UsuarioGestionado | null> {
+    await this.asegurarEstructura();
     const pool = obtenerPoolActual();
 
     const [rows] = await pool.query<UsuarioGestionRow[]>(
-      `
-        SELECT
-          id,
-          username,
-          email,
-          nombre_mostrar,
-          rol,
-          activo,
-          regiones_json,
-          ultimo_login_at,
-          created_at,
-          updated_at
-        FROM ${TABLA_USUARIOS}
-        WHERE id = ?
-        LIMIT 1
-      `,
+      `${SELECT_USUARIO} WHERE id = ? LIMIT 1`,
       [id]
     );
 
@@ -157,34 +222,24 @@ export class UsuariosServicio {
   }
 
   async listarUsuarios(): Promise<UsuarioGestionado[]> {
+    await this.asegurarEstructura();
     const pool = obtenerPoolActual();
 
     const [rows] = await pool.query<UsuarioGestionRow[]>(
-      `
-        SELECT
-          id,
-          username,
-          email,
-          nombre_mostrar,
-          rol,
-          activo,
-          regiones_json,
-          ultimo_login_at,
-          created_at,
-          updated_at
-        FROM ${TABLA_USUARIOS}
-        ORDER BY created_at DESC, id DESC
-      `
+      `${SELECT_USUARIO} ORDER BY created_at DESC, id DESC`
     );
 
     return rows.map(mapearUsuario);
   }
 
   async crearUsuarioRegional(payload: CrearUsuarioRegionalInput): Promise<CrearUsuarioRegionalResultado> {
+    await this.asegurarEstructura();
     const nombre = payload.nombre.trim();
     const username = payload.username.trim().toLowerCase();
     const email = payload.email.trim().toLowerCase();
     const regiones = [...new Set(payload.regiones.map((region) => region.trim()).filter(Boolean))];
+    const establecimientos = [...new Set((payload.establecimientos ?? []).map((e) => e.trim()).filter(Boolean))];
+    const puedeVerSeguimiento = Boolean(payload.puedeVerSeguimiento);
     const passwordTemporal = payload.passwordTemporal?.trim() || generarPasswordTemporal();
 
     if (!nombre || !username || !email) {
@@ -206,35 +261,22 @@ export class UsuariosServicio {
       const [resultado] = await pool.query<ResultSetHeader>(
         `
           INSERT INTO ${TABLA_USUARIOS}
-            (username, email, password_hash, nombre_mostrar, rol, regiones_json, activo, requiere_cambio_password)
-          VALUES (?, ?, ?, ?, 'regional', ?, 1, 1)
+            (username, email, password_hash, nombre_mostrar, rol, regiones_json, establecimientos_json, puede_ver_seguimiento, activo, requiere_cambio_password)
+          VALUES (?, ?, ?, ?, 'regional', ?, ?, ?, 1, 1)
         `,
         [
           username,
           email,
           passwordHash,
           nombre,
-          JSON.stringify(regiones)
+          JSON.stringify(regiones),
+          establecimientos.length > 0 ? JSON.stringify(establecimientos) : null,
+          puedeVerSeguimiento ? 1 : 0
         ]
       );
 
       const [rows] = await pool.query<UsuarioGestionRow[]>(
-        `
-          SELECT
-            id,
-            username,
-            email,
-            nombre_mostrar,
-            rol,
-            activo,
-            regiones_json,
-            ultimo_login_at,
-            created_at,
-            updated_at
-          FROM ${TABLA_USUARIOS}
-          WHERE id = ?
-          LIMIT 1
-        `,
+        `${SELECT_USUARIO} WHERE id = ? LIMIT 1`,
         [resultado.insertId]
       );
 
@@ -257,11 +299,14 @@ export class UsuariosServicio {
   }
 
   async actualizarUsuarioRegional(payload: ActualizarUsuarioRegionalInput): Promise<UsuarioGestionado> {
+    await this.asegurarEstructura();
     const id = Number(payload.id);
     const nombre = payload.nombre.trim();
     const username = payload.username.trim().toLowerCase();
     const email = payload.email.trim().toLowerCase();
     const regiones = [...new Set(payload.regiones.map((region) => region.trim()).filter(Boolean))];
+    const establecimientos = [...new Set((payload.establecimientos ?? []).map((e) => e.trim()).filter(Boolean))];
+    const puedeVerSeguimiento = Boolean(payload.puedeVerSeguimiento);
     const activo = payload.estado === "activo" ? 1 : 0;
 
     if (!Number.isInteger(id) || id <= 0) {
@@ -296,6 +341,8 @@ export class UsuariosServicio {
             email = ?,
             nombre_mostrar = ?,
             regiones_json = ?,
+            establecimientos_json = ?,
+            puede_ver_seguimiento = ?,
             activo = ?
           WHERE id = ?
           LIMIT 1
@@ -305,6 +352,8 @@ export class UsuariosServicio {
           email,
           nombre,
           JSON.stringify(regiones),
+          establecimientos.length > 0 ? JSON.stringify(establecimientos) : null,
+          puedeVerSeguimiento ? 1 : 0,
           activo,
           id
         ]
@@ -330,6 +379,7 @@ export class UsuariosServicio {
   }
 
   async cambiarEstadoUsuarioRegional(payload: CambiarEstadoUsuarioInput): Promise<UsuarioGestionado> {
+    await this.asegurarEstructura();
     const id = Number(payload.id);
     const activo = payload.estado === "activo" ? 1 : 0;
     const pool = obtenerPoolActual();
@@ -373,6 +423,7 @@ export class UsuariosServicio {
   }
 
   async eliminarUsuarioRegional(id: number): Promise<void> {
+    await this.asegurarEstructura();
     const userId = Number(id);
     const pool = obtenerPoolActual();
 
@@ -404,6 +455,7 @@ export class UsuariosServicio {
   }
 
   async resetearPasswordUsuarioRegional(payload: ResetearPasswordUsuarioInput): Promise<ResetearPasswordUsuarioResultado> {
+    await this.asegurarEstructura();
     const userId = Number(payload.id);
     const passwordTemporal = payload.passwordTemporal?.trim() || generarPasswordTemporal();
     const pool = obtenerPoolActual();

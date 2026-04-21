@@ -140,17 +140,6 @@ export const resolverRegionParaRegistro = (
   return regionSolicitada;
 };
 
-export const obtenerDepartamentosDesdeRegiones = (regionIds: number[]) =>
-  Array.from(
-    new Set(
-      regionIds.map((regionId) => {
-        if (regionId === 19) return 8;
-        if (regionId === 20) return 5;
-        return regionId;
-      })
-    )
-  ).sort((a, b) => a - b);
-
 export interface PivotFilterLike {
   field: string;
   values?: Array<string | number>;
@@ -187,4 +176,3 @@ export const aplicarFiltroRegionalPivot = <T extends PivotFilterLike>(filtros: T
 
   return filtrosBase;
 };
-

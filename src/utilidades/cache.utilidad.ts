@@ -111,22 +111,6 @@ class MemoryCache {
   }
 
   /**
-   * Elimina todas las entradas que coincidan con un patrón
-   * @param pattern Patrón de prefijo para las claves
-   */
-  deleteByPattern(pattern: string): number {
-    let deleted = 0;
-    for (const key of this.cache.keys()) {
-      if (key.startsWith(pattern)) {
-        this.cache.delete(key);
-        this.pending.delete(key);
-        deleted++;
-      }
-    }
-    return deleted;
-  }
-
-  /**
    * Limpia todo el caché
    */
   clear(): void {
@@ -180,17 +164,6 @@ class MemoryCache {
     const total = this.stats.hits + this.stats.misses;
     if (total === 0) return 0;
     return this.stats.hits / total;
-  }
-
-  /**
-   * Destruye el caché y limpia el intervalo
-   */
-  destroy(): void {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-      this.cleanupInterval = null;
-    }
-    this.clear();
   }
 }
 

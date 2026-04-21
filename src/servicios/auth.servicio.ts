@@ -12,6 +12,8 @@ export interface UsuarioAutenticado {
   nombreMostrar: string;
   rol: string;
   regiones: string[];
+  establecimientos: string[];
+  puedeVerSeguimiento: boolean;
   requiereCambioPassword: boolean;
 }
 
@@ -23,6 +25,8 @@ interface UsuarioRow extends RowDataPacket {
   nombre_mostrar: string;
   rol: string;
   regiones_json: string | string[] | null;
+  establecimientos_json: string | string[] | null;
+  puede_ver_seguimiento: number | boolean;
   requiere_cambio_password: number | boolean;
 }
 
@@ -35,6 +39,8 @@ interface SesionRow extends RowDataPacket {
   nombre_mostrar: string;
   rol: string;
   regiones_json: string | string[] | null;
+  establecimientos_json: string | string[] | null;
+  puede_ver_seguimiento: number | boolean;
   requiere_cambio_password: number | boolean;
   expires_at: Date | string;
 }
@@ -94,13 +100,15 @@ const normalizarRegiones = (raw: string | string[] | null) => {
   return [];
 };
 
-const mapearUsuario = (row: Pick<UsuarioRow, "id" | "username" | "email" | "nombre_mostrar" | "rol" | "regiones_json" | "requiere_cambio_password">): UsuarioAutenticado => ({
+const mapearUsuario = (row: Pick<UsuarioRow, "id" | "username" | "email" | "nombre_mostrar" | "rol" | "regiones_json" | "establecimientos_json" | "puede_ver_seguimiento" | "requiere_cambio_password">): UsuarioAutenticado => ({
   id: row.id,
   username: row.username,
   email: row.email,
   nombreMostrar: row.nombre_mostrar,
   rol: row.rol,
   regiones: normalizarRegiones(row.regiones_json),
+  establecimientos: normalizarRegiones(row.establecimientos_json),
+  puedeVerSeguimiento: Boolean(row.puede_ver_seguimiento),
   requiereCambioPassword: Boolean(row.requiere_cambio_password)
 });
 
@@ -128,6 +136,8 @@ class AuthServicio {
         nombre_mostrar VARCHAR(120) NOT NULL,
         rol VARCHAR(32) NOT NULL DEFAULT 'central',
         regiones_json JSON DEFAULT NULL,
+        establecimientos_json JSON DEFAULT NULL,
+        puede_ver_seguimiento TINYINT(1) NOT NULL DEFAULT 0,
         activo TINYINT(1) NOT NULL DEFAULT 1,
         requiere_cambio_password TINYINT(1) NOT NULL DEFAULT 0,
         ultimo_login_at DATETIME NULL,
@@ -138,6 +148,11 @@ class AuthServicio {
         UNIQUE KEY uq_${TABLA_USUARIOS}_email (email)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+
+    await this.asegurarColumnaUsuarios(
+      "establecimientos_json",
+      "JSON DEFAULT NULL AFTER regiones_json"
+    );
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS ${TABLA_SESIONES} (
@@ -186,6 +201,11 @@ class AuthServicio {
       "TINYINT(1) NOT NULL DEFAULT 0 AFTER activo"
     );
 
+    await this.asegurarColumnaUsuarios(
+      "puede_ver_seguimiento",
+      "TINYINT(1) NOT NULL DEFAULT 0 AFTER establecimientos_json"
+    );
+
     await this.limpiarSesionesExpiradas();
     await this.limpiarTokensRecuperacionExpirados();
     await this.bootstrapAdminSiHaceFalta();
@@ -200,8 +220,8 @@ class AuthServicio {
 
     const [rows] = await pool.query<UsuarioRow[]>(
       `
-        SELECT id, username, email, password_hash, nombre_mostrar, rol, regiones_json
-        , requiere_cambio_password
+        SELECT id, username, email, password_hash, nombre_mostrar, rol, regiones_json, establecimientos_json
+        , puede_ver_seguimiento, requiere_cambio_password
         FROM ${TABLA_USUARIOS}
         WHERE activo = 1 AND (LOWER(username) = ? OR LOWER(COALESCE(email, '')) = ?)
         LIMIT 1
@@ -268,6 +288,8 @@ class AuthServicio {
           u.nombre_mostrar,
           u.rol,
           u.regiones_json,
+          u.establecimientos_json,
+          u.puede_ver_seguimiento,
           u.requiere_cambio_password
         FROM ${TABLA_SESIONES} s
         INNER JOIN ${TABLA_USUARIOS} u ON u.id = s.user_id
@@ -320,8 +342,8 @@ class AuthServicio {
 
     const [rows] = await pool.query<UsuarioRow[]>(
       `
-        SELECT id, username, email, password_hash, nombre_mostrar, rol, regiones_json
-        , requiere_cambio_password
+        SELECT id, username, email, password_hash, nombre_mostrar, rol, regiones_json, establecimientos_json
+        , puede_ver_seguimiento, requiere_cambio_password
         FROM ${TABLA_USUARIOS}
         WHERE activo = 1 AND (LOWER(username) = ? OR LOWER(COALESCE(email, '')) = ?)
         LIMIT 1
@@ -413,7 +435,7 @@ class AuthServicio {
 
     const [rows] = await pool.query<UsuarioRow[]>(
       `
-        SELECT id, username, email, password_hash, nombre_mostrar, rol, regiones_json, requiere_cambio_password
+        SELECT id, username, email, password_hash, nombre_mostrar, rol, regiones_json, establecimientos_json, puede_ver_seguimiento, requiere_cambio_password
         FROM ${TABLA_USUARIOS}
         WHERE id = ? AND activo = 1
         LIMIT 1
@@ -450,6 +472,7 @@ class AuthServicio {
 
     return mapearUsuario({
       ...usuario,
+      puede_ver_seguimiento: usuario.puede_ver_seguimiento,
       requiere_cambio_password: 0
     });
   }
@@ -527,7 +550,7 @@ class AuthServicio {
 
     const password =
       entorno.auth.bootstrapPassword ||
-      (entorno.ambiente === "development" ? "AdminLocal123!" : "");
+      (!entorno.esProduccion && entorno.ambiente !== "test" ? "AdminLocal123!" : "");
 
     if (!password) {
       logger.warn("No se creo usuario bootstrap porque no hay AUTH_BOOTSTRAP_PASSWORD configurado");

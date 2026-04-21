@@ -5,7 +5,10 @@
   "scripts": {
     "dev": "ts-node --project tsconfig.json src/server.ts",
     "build": "rm -rf dist && tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "refresh:tablero-resumen": "node scripts/refrescar-tablero-resumen.js",
+    "explain:queries": "node scripts/explain-queries.js",
+    "sync:bas-bdr-us": "node scripts/sincronizar-bas-bdr-us.js"
   },
   "keywords": [],
   "author": "",

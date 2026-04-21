@@ -3,6 +3,7 @@ import type { Pool } from "mysql2/promise";
 
 import { obtenerPoolActual } from "../base_datos/pool";
 import { cache, CACHE_TTL, CACHE_KEYS } from "../utilidades/cache.utilidad";
+import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
 
 const tomarPool = () => obtenerPoolActual();
 
@@ -729,14 +730,14 @@ export const obtenerValoresDimension = async (
         return obtenerMunicipiosPorRegion(pool, regionesFiltro, busqueda, limiteFinal);
       }
 
-      // Caso especial: ESTABLECIMIENTO con filtros
+      // Caso especial: ESTABLECIMIENTO — siempre devolver detalles completos
+      // (regionCodigo, nivel, municipio, rups). Esto permite al frontend
+      // auto-seleccionar la región al ingresar un código RUPS sin región previa.
       if (dimensionId === "ESTABLECIMIENTO") {
         if (filtroMunicipio) {
           return obtenerEstablecimientosPorMunicipio(pool, filtroMunicipio, busqueda, limiteFinal, regionesFiltro);
         }
-        if (regionesFiltro.length) {
-          return obtenerEstablecimientosPorRegion(pool, regionesFiltro, busqueda, limiteFinal);
-        }
+        return obtenerEstablecimientosPorRegion(pool, regionesFiltro, busqueda, limiteFinal);
       }
 
       const tabla = catalog.table;
@@ -929,7 +930,8 @@ const obtenerEstablecimientosPorMunicipio = async (
   }));
 };
 
-// Función especial para obtener establecimientos filtrados por región
+// Función especial para obtener establecimientos con detalles (nivel, región, municipio)
+// El filtro por región es opcional: si no se especifica, devuelve todos los establecimientos.
 const obtenerEstablecimientosPorRegion = async (
   pool: Pool,
   filtroRegion: string[],
@@ -949,9 +951,10 @@ const obtenerEstablecimientosPorRegion = async (
   const condiciones: string[] = [];
   const parametros: Array<string | number> = [];
 
-  // Filtrar por región
-  condiciones.push(`us.C_REGION IN (${filtroRegion.map(() => "?").join(", ")})`);
-  parametros.push(...filtroRegion);
+  if (filtroRegion.length) {
+    condiciones.push(`us.C_REGION IN (${filtroRegion.map(() => "?").join(", ")})`);
+    parametros.push(...filtroRegion);
+  }
 
   // Búsqueda opcional
   if (busqueda) {
@@ -1122,6 +1125,49 @@ const obtenerYearsDesdeFiltros = (filtros?: PivotFilter[]): number[] => {
   return valores.map((valor) => Number(valor)).filter((valor) => Number.isFinite(valor));
 };
 
+const resolverAniosConsultaPivot = async (payload: PivotQueryPayload): Promise<number[]> => {
+  const aniosFiltro = obtenerYearsDesdeFiltros(payload.filters);
+  const periodos = await obtenerPeriodosDisponibles();
+  let aniosDisponibles = periodos.map((p) => p.anio).sort((a, b) => a - b);
+
+  if (!aniosDisponibles.length) {
+    aniosDisponibles = await obtenerTablasDetalleDisponibles();
+  }
+
+  const anioReciente = aniosDisponibles.length ? Math.max(...aniosDisponibles) : 2025;
+
+  if (payload.years !== undefined && payload.years.length > 0) {
+    const aniosValidos = payload.years.filter((anio) => aniosDisponibles.includes(anio));
+    if (aniosValidos.length === 0) {
+      throw new Error("Ninguno de los años solicitados está disponible en la base de datos");
+    }
+    return aniosValidos.sort((a, b) => a - b);
+  }
+
+  if (payload.year !== undefined) {
+    if (!aniosDisponibles.includes(payload.year)) {
+      throw new Error(`El año ${payload.year} no está disponible en la base de datos`);
+    }
+    return [payload.year];
+  }
+
+  if (aniosFiltro.length) {
+    const aniosValidos = Array.from(
+      new Set(aniosFiltro.filter((anio) => aniosDisponibles.includes(anio)))
+    ).sort((a, b) => a - b);
+    if (!aniosValidos.length) {
+      throw new Error("Los años solicitados por filtro no están disponibles en la base de datos");
+    }
+    return aniosValidos;
+  }
+
+  if (aniosDisponibles.length) {
+    return [anioReciente];
+  }
+
+  return [2025];
+};
+
 const limpiarTextoPresentacion = (valor: unknown): unknown => {
   if (typeof valor !== "string") return valor;
   const sinControl = valor.replace(/[\r\n\t]/g, " ").replace(/\s+/g, " ").trim();
@@ -1139,6 +1185,117 @@ const limpiarFilaSalida = (fila: Record<string, unknown>): Record<string, unknow
 
 const limpiarFilasSalida = (filas: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {
   return filas.map((fila) => limpiarFilaSalida(fila));
+};
+
+interface ConceptoOrdenadoMetadata {
+  label: string;
+  sortKey: string;
+}
+
+const CONCEPTO_ORDENADO_CACHE_KEY = "pivot:concepto_ordenado:metadata";
+
+const normalizarCodigoConcepto = (valor: unknown): string => {
+  if (valor === null || valor === undefined) return "";
+  return String(valor).trim();
+};
+
+const normalizarCodigoConceptoSinCeros = (valor: unknown): string => {
+  const normalizado = normalizarCodigoConcepto(valor);
+  if (!normalizado) return "";
+  const sinCeros = normalizado.replace(/^0+/, "");
+  return sinCeros || "0";
+};
+
+const construirSortKeyConcepto = (valor: unknown): string => {
+  const normalizado = normalizarCodigoConcepto(valor);
+  if (!normalizado) return "9999999999";
+  const sinCeros = normalizarCodigoConceptoSinCeros(normalizado);
+  return /^\d+$/.test(sinCeros)
+    ? sinCeros.padStart(10, "0")
+    : normalizado.padEnd(10, " ");
+};
+
+const construirEtiquetaConceptoFallback = (codigo: string): string => {
+  const normalizado = normalizarCodigoConcepto(codigo);
+  return normalizado
+    ? `Concepto ${normalizado} (sin catálogo)`
+    : "Concepto sin catálogo";
+};
+
+const registrarMetadataConcepto = (
+  metadata: Map<string, ConceptoOrdenadoMetadata>,
+  codigo: unknown,
+  label: string,
+  sortKey: string
+) => {
+  const original = normalizarCodigoConcepto(codigo);
+  const sinCeros = normalizarCodigoConceptoSinCeros(codigo);
+
+  if (original && !metadata.has(original)) {
+    metadata.set(original, { label, sortKey });
+  }
+
+  if (sinCeros && !metadata.has(sinCeros)) {
+    metadata.set(sinCeros, { label, sortKey });
+  }
+};
+
+const obtenerMetadataConceptoOrdenado = async (): Promise<Map<string, ConceptoOrdenadoMetadata>> => {
+  return cache.getOrSet(
+    CONCEPTO_ORDENADO_CACHE_KEY,
+    async () => {
+      const pool = tomarPool();
+      const metadata = new Map<string, ConceptoOrdenadoMetadata>();
+
+      const [ordenados] = await pool.query<RowDataPacket[]>(
+        "SELECT codigo, descripcion FROM cat_concepto_ordenado"
+      );
+      ordenados.forEach((row) => {
+        const codigo = normalizarCodigoConcepto(row.codigo);
+        const descripcion = String(row.descripcion ?? "").trim();
+        if (!codigo || !descripcion) return;
+        registrarMetadataConcepto(
+          metadata,
+          codigo,
+          descripcion,
+          construirSortKeyConcepto(codigo)
+        );
+      });
+
+      const [conceptos] = await pool.query<RowDataPacket[]>(
+        "SELECT codigo, descripcion FROM cat_conceptos"
+      );
+      conceptos.forEach((row) => {
+        const codigo = normalizarCodigoConcepto(row.codigo);
+        const descripcion = String(row.descripcion ?? "").trim();
+        if (!codigo || !descripcion) return;
+        registrarMetadataConcepto(
+          metadata,
+          codigo,
+          descripcion,
+          construirSortKeyConcepto(codigo)
+        );
+      });
+
+      const [conceptosGe] = await pool.query<RowDataPacket[]>(
+        "SELECT C_CONCEPTO, D_CONCEPTO FROM AT2_BDR_CONCEPTOS_GE"
+      );
+      conceptosGe.forEach((row) => {
+        const codigo = normalizarCodigoConcepto(row.C_CONCEPTO);
+        const descripcion = String(row.D_CONCEPTO ?? "").trim();
+        if (!codigo || !descripcion) return;
+        registrarMetadataConcepto(
+          metadata,
+          codigo,
+          descripcion,
+          construirSortKeyConcepto(codigo)
+        );
+      });
+
+      return metadata;
+    },
+    CACHE_TTL.CATALOGO_PIVOT
+  );
 };
 
 const transformarDatosPivot = (
@@ -1278,6 +1435,246 @@ const transformarDatosPivot = (
   };
 };
 
+const construirTotalGeneralPivotado = (
+  datosTransformados: Array<Record<string, unknown>>,
+  totalesPivotados: unknown[]
+): Record<string, unknown> | null => {
+  if (!datosTransformados.length || !totalesPivotados.length) {
+    return null;
+  }
+
+  const totalGeneral: Record<string, unknown> = {};
+  const cabeceras = Object.keys(datosTransformados[0]);
+  cabeceras.forEach((cabecera, index) => {
+    totalGeneral[cabecera] = totalesPivotados[index] ?? null;
+  });
+
+  return totalGeneral;
+};
+
+async function ejecutarConsultaConceptoOrdenadoOptimizada(
+  payload: PivotQueryPayload
+): Promise<PivotQueryResult | null> {
+  const filas = payload.rows ?? [];
+  const columnas = payload.columns ?? [];
+  const valores = payload.values ?? [];
+  const filtros = payload.filters ?? [];
+  const columnasPermitidas = new Set(["REGION", "MUNICIPIO"]);
+  const filtrosPermitidos = new Set([
+    "ANIO",
+    "REGION",
+    "DEPARTAMENTO",
+    "MUNICIPIO",
+    "US",
+    "CONCEPTO",
+    "CONCEPTO_ORDENADO"
+  ]);
+
+  const usaRutaOptimizada =
+    filas.length === 1 &&
+    filas[0] === "CONCEPTO_ORDENADO" &&
+    valores.length === 1 &&
+    valores[0].field === "TOTAL" &&
+    (valores[0].aggregation === undefined || valores[0].aggregation === "SUM") &&
+    columnas.every((columna) => columnasPermitidas.has(columna)) &&
+    filtros.every((filtro) => filtrosPermitidos.has(filtro.field));
+
+  if (!usaRutaOptimizada) {
+    return null;
+  }
+
+  const aniosConsulta = await resolverAniosConsultaPivot(payload);
+  const incluyeRegion = columnas.includes("REGION");
+  const incluyeMunicipio = columnas.includes("MUNICIPIO");
+  const limitePorDefecto = columnas.length > 0 ? DEFAULT_LIMIT_PIVOT : DEFAULT_LIMIT;
+  const limit = Math.min(payload.limit ?? limitePorDefecto, MAX_LIMIT);
+  const condiciones = [`det.N_ANIO IN (${aniosConsulta.map(() => "?").join(", ")})`];
+  const parametros: Array<string | number> = [...aniosConsulta];
+
+  for (const filtro of filtros) {
+    if (filtro.field === "ANIO") continue;
+
+    const dimension = DIMENSIONES[filtro.field];
+    if (!dimension) {
+      return null;
+    }
+
+    const valoresFiltro = normalizarValoresFiltro(dimension, filtro.values);
+    if (!valoresFiltro.length) continue;
+
+    if (filtro.field === "REGION") {
+      condiciones.push(`us.C_REGION IN (${valoresFiltro.map(() => "?").join(", ")})`);
+      parametros.push(...valoresFiltro);
+      continue;
+    }
+
+    if (filtro.field === "DEPARTAMENTO") {
+      condiciones.push(`us.C_DEPARTAMENTO IN (${valoresFiltro.map(() => "?").join(", ")})`);
+      parametros.push(...valoresFiltro);
+      continue;
+    }
+
+    if (filtro.field === "US") {
+      condiciones.push(`det.C_US IN (${valoresFiltro.map(() => "?").join(", ")})`);
+      parametros.push(...valoresFiltro.map((valor) => String(valor)));
+      continue;
+    }
+
+    if (filtro.field === "CONCEPTO" || filtro.field === "CONCEPTO_ORDENADO") {
+      condiciones.push(`det.C_CONCEPTO IN (${valoresFiltro.map(() => "?").join(", ")})`);
+      parametros.push(...valoresFiltro.map((valor) => String(valor)));
+      continue;
+    }
+
+    if (filtro.field === "MUNICIPIO") {
+      const municipios = valoresFiltro
+        .map((valor) => String(valor))
+        .map((valor) => valor.split("-"))
+        .filter((partes) => partes.length === 2);
+
+      if (!municipios.length) continue;
+
+      condiciones.push(
+        `(${municipios
+          .map(() => "(us.C_DEPARTAMENTO = ? AND us.C_MUNICIPIO = ?)")
+          .join(" OR ")})`
+      );
+
+      municipios.forEach(([departamento, municipio]) => {
+        parametros.push(Number(departamento), Number(municipio));
+      });
+      continue;
+    }
+
+    return null;
+  }
+
+  const joins = [
+    "INNER JOIN BAS_BDR_US us ON us.C_US COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci"
+  ];
+  if (incluyeMunicipio || filtros.some((filtro) => filtro.field === "MUNICIPIO")) {
+    joins.push(
+      "LEFT JOIN BAS_BDR_MUNICIPIOS muni ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO AND muni.C_MUNICIPIO = us.C_MUNICIPIO"
+    );
+  }
+
+  const selectParts = ["det.C_CONCEPTO AS concepto_codigo"];
+  const groupByParts = ["det.C_CONCEPTO"];
+  const orderByParts = ["LPAD(det.C_CONCEPTO, 10, '0')"];
+
+  if (incluyeRegion) {
+    selectParts.push("us.C_REGION AS region_codigo");
+    groupByParts.push("us.C_REGION");
+    orderByParts.push("us.C_REGION");
+  }
+
+  if (incluyeMunicipio) {
+    selectParts.push("CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo");
+    selectParts.push(
+      "COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio"
+    );
+    groupByParts.push("us.C_DEPARTAMENTO", "us.C_MUNICIPIO", "muni.D_MUNICIPIO");
+    orderByParts.push("municipio");
+  }
+
+  selectParts.push(`SUM(${TOTAL_EXPRESSION}) AS total_optimized`);
+
+  const sql = `SELECT
+  ${selectParts.join(",\n  ")}
+FROM ${TABLA_DETALLE} det
+${joins.join("\n")}
+WHERE ${condiciones.join(" AND ")}
+GROUP BY ${groupByParts.join(", ")}
+ORDER BY ${orderByParts.join(", ")}
+LIMIT ${limit}`;
+
+  const pool = tomarPool();
+  const [rows] = await pool.query<RowDataPacket[]>(sql, parametros);
+  const metadataConceptos = await obtenerMetadataConceptoOrdenado();
+  const medidas = [{ alias: "total_optimized", etiqueta: "Total de Atenciones", id: "TOTAL" }];
+
+  const datosNormalizados = rows.map((row) => {
+    const codigoConcepto = normalizarCodigoConcepto(row.concepto_codigo);
+    const metadata =
+      metadataConceptos.get(codigoConcepto) ??
+      metadataConceptos.get(normalizarCodigoConceptoSinCeros(codigoConcepto));
+    const objeto: Record<string, unknown> = {
+      CONCEPTO_ORDENADO: metadata?.label ?? construirEtiquetaConceptoFallback(codigoConcepto),
+      total_optimized: Number(row.total_optimized ?? 0),
+      "Total de Atenciones": Number(row.total_optimized ?? 0),
+      concepto_sort_key: metadata?.sortKey ?? construirSortKeyConcepto(codigoConcepto)
+    };
+
+    if (incluyeRegion) {
+      const codigoRegion = Number(row.region_codigo);
+      objeto.REGION = REGION_CODE_TO_NAME[codigoRegion] ?? `Region ${row.region_codigo}`;
+    }
+
+    if (incluyeMunicipio) {
+      objeto.MUNICIPIO = String(
+        row.municipio ?? row.municipio_codigo ?? "Municipio sin dato"
+      );
+      objeto.MUNICIPIO_CODIGO = String(row.municipio_codigo ?? "");
+    }
+
+    return objeto;
+  });
+
+  datosNormalizados.sort((a, b) => {
+    const sortA = String(a.concepto_sort_key ?? "");
+    const sortB = String(b.concepto_sort_key ?? "");
+    if (sortA !== sortB) {
+      return sortA.localeCompare(sortB);
+    }
+    return String(a.MUNICIPIO ?? a.REGION ?? "").localeCompare(
+      String(b.MUNICIPIO ?? b.REGION ?? "")
+    );
+  });
+
+  datosNormalizados.forEach((fila) => {
+    delete fila.concepto_sort_key;
+  });
+
+  let datosTransformados: Array<Record<string, unknown>> = datosNormalizados;
+  let totalGeneral: Record<string, unknown> | null = null;
+
+  if (columnas.length > 0) {
+    const pivotResult = transformarDatosPivot(datosNormalizados, filas, columnas, medidas);
+    const totalesPivotados = pivotResult.totales;
+
+    datosTransformados = pivotResult.filas.map((fila) => {
+      const objeto: Record<string, unknown> = {};
+      pivotResult.cabeceras.forEach((cabecera, colIndex) => {
+        objeto[cabecera] = fila[colIndex];
+      });
+      return objeto;
+    });
+
+    totalGeneral = construirTotalGeneralPivotado(datosTransformados, totalesPivotados);
+  } else if (payload.includeTotals) {
+    const totalSql = `SELECT SUM(${TOTAL_EXPRESSION}) AS total_optimized
+FROM ${TABLA_DETALLE} det
+${joins.join("\n")}
+WHERE ${condiciones.join(" AND ")}`;
+    const [totales] = await pool.query<RowDataPacket[]>(totalSql, parametros);
+    totalGeneral = {
+      "Total de Atenciones": Number(totales[0]?.total_optimized ?? 0)
+    };
+  }
+
+  return {
+    datos: limpiarFilasSalida(datosTransformados),
+    totalGeneral: totalGeneral ? limpiarFilaSalida(totalGeneral) : null,
+    aniosConsultados: aniosConsulta,
+    metadata: {
+      dimensionesSeleccionadas: [...filas, ...columnas],
+      dimensionesFilas: filas,
+      dimensionesColumnas: columnas,
+      medidasSeleccionadas: valores.map((valor) => valor.field)
+    }
+  };
+}
+
 async function ejecutarConsultaAgregada(payload: PivotQueryPayload): Promise<PivotQueryResult | null> {
   // Solo usar agregación si:
   // 1. Rows = ['CONCEPTO']
@@ -1396,6 +1793,11 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
   return cache.getOrSet(
     claveCache,
     async () => {
+      const resultadoConceptoOrdenado = await ejecutarConsultaConceptoOrdenadoOptimizada(payload);
+      if (resultadoConceptoOrdenado) {
+        return resultadoConceptoOrdenado;
+      }
+
       const resultadoAgregado = await ejecutarConsultaAgregada(payload);
       if (resultadoAgregado) {
         return resultadoAgregado;
@@ -1436,40 +1838,7 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
 
       aplicarFiltros(payload.filters, setDimensiones, condiciones, parametros);
 
-      const aniosFiltro = obtenerYearsDesdeFiltros(payload.filters);
-      const periodos = await obtenerPeriodosDisponibles();
-      let aniosDisponibles = periodos.map((p) => p.anio).sort((a, b) => a - b);
-
-      if (!aniosDisponibles.length) {
-        aniosDisponibles = await obtenerTablasDetalleDisponibles();
-      }
-
-      const anioReciente = aniosDisponibles.length ? Math.max(...aniosDisponibles) : 2025;
-      let aniosConsulta: number[] = [];
-
-      if (payload.years !== undefined && payload.years.length > 0) {
-        const aniosValidos = payload.years.filter(a => aniosDisponibles.includes(a));
-        if (aniosValidos.length === 0) {
-          throw new Error("Ninguno de los años solicitados está disponible en la base de datos");
-        }
-        aniosConsulta = aniosValidos.sort((a, b) => a - b);
-      } else if (payload.year !== undefined) {
-        if (!aniosDisponibles.includes(payload.year)) {
-          throw new Error(`El año ${payload.year} no está disponible en la base de datos`);
-        }
-        aniosConsulta = [payload.year];
-      } else if (aniosFiltro.length) {
-        aniosConsulta = Array.from(new Set(aniosFiltro.filter((anio) => aniosDisponibles.includes(anio)))).sort(
-          (a, b) => a - b
-        );
-        if (!aniosConsulta.length) {
-          throw new Error("Los años solicitados por filtro no están disponibles en la base de datos");
-        }
-      } else if (aniosDisponibles.length) {
-        aniosConsulta = [anioReciente];
-      } else {
-        aniosConsulta = [2025];
-      }
+      const aniosConsulta = await resolverAniosConsultaPivot(payload);
 
       const fromDetalle = `${TABLA_DETALLE} det`;
       const anioPlaceholders = aniosConsulta.map(() => "?").join(", ");
@@ -1571,16 +1940,7 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
       }
 
       const totalGeneralFinal = columnas.length > 0 && totalesPivotados.length > 0
-        ? (() => {
-            const objeto: Record<string, unknown> = {};
-            if (datosTransformados.length > 0) {
-              const cabeceras = Object.keys(datosTransformados[0]);
-              cabeceras.forEach((cabecera, index) => {
-                objeto[cabecera] = totalesPivotados[index] ?? null;
-              });
-            }
-            return objeto;
-          })()
+        ? construirTotalGeneralPivotado(datosTransformados, totalesPivotados)
         : totalGeneral;
 
       return {

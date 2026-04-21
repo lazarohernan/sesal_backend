@@ -3,7 +3,7 @@ import { testDatabaseConnection, getDatabaseInfo, saveDatabaseConfig, getSavedDa
 import { requireAdminAccess } from "../middleware/admin.middleware";
 
 const configuracionRutas: FastifyPluginAsync = async (fastify) => {
-  fastify.addHook("onRequest", requireAdminAccess);
+  fastify.addHook("preHandler", requireAdminAccess);
 
   // Ruta para probar conexion a base de datos
   fastify.post("/test-db-connection", testDatabaseConnection);
