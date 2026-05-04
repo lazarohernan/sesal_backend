@@ -142,7 +142,7 @@ const JOIN_DEFINITIONS: Record<JoinKey, string> = {
 
 const ETIQUETA_ESTABLECIMIENTO_SQL = `
   CONCAT(
-    COALESCE(cat_establecimiento.nombre, CAST(det.C_US AS CHAR)),
+    COALESCE(cat_establecimiento.nombre, us.D_US, CAST(det.C_US AS CHAR)),
     ' (RUPS: ',
     CAST(det.C_US AS CHAR),
     ')',
@@ -158,6 +158,73 @@ const ETIQUETA_ESTABLECIMIENTO_SQL = `
     END
   )
 `;
+
+const REGION_DESCRIPCION_FALLBACK_SQL = `
+  CASE CAST(us.C_REGION AS UNSIGNED)
+${Object.entries(REGION_CODE_TO_NAME)
+  .map(([codigo, nombre]) => `    WHEN ${codigo} THEN '${nombre.replace(/'/g, "''")}'`)
+  .join("\n")}
+    ELSE NULL
+  END
+`;
+
+const REGION_DESCRIPCION_SQL = `
+  COALESCE(
+    cat_region.descripcion,
+    ${REGION_DESCRIPCION_FALLBACK_SQL},
+    CAST(COALESCE(us.C_REGION, det.C_US) AS CHAR)
+  )
+`;
+
+const NIVEL_OPERATIVO_CODIGO_SQL = `
+  CASE
+    WHEN us.C_NIVEL_US IN (1, 2, 3) THEN '002'
+    ELSE '001'
+  END
+`;
+
+const NIVEL_OPERATIVO_DESCRIPCION_SQL = `
+  CASE
+    WHEN us.C_NIVEL_US IN (1, 2, 3) THEN 'Segundo Nivel de Atención'
+    ELSE 'Primer Nivel de Atención'
+  END
+`;
+
+const NIVEL_OPERATIVO_VALORES = [
+  { valor: "001", etiqueta: "Primer Nivel de Atención" },
+  { valor: "002", etiqueta: "Segundo Nivel de Atención" }
+];
+
+const NIVEL_ESTABLECIMIENTO_ORDEN_SQL = `
+  CASE CAST(us.C_NIVEL_US AS UNSIGNED)
+    WHEN 3 THEN 1
+    WHEN 2 THEN 2
+    WHEN 1 THEN 3
+    WHEN 5 THEN 4
+    WHEN 6 THEN 5
+    ELSE 99
+  END
+`;
+
+const NIVEL_ESTABLECIMIENTO_CATALOGO_ORDEN_SQL = `
+  CASE CAST(codigo AS UNSIGNED)
+    WHEN 3 THEN 1
+    WHEN 2 THEN 2
+    WHEN 1 THEN 3
+    WHEN 5 THEN 4
+    WHEN 6 THEN 5
+    ELSE 99
+  END,
+  descripcion
+`;
+
+const NIVEL_ESTABLECIMIENTO_ORDEN_ETIQUETA = new Map<string, number>([
+  ["Hospital de Especialidades", 1],
+  ["Hospital General", 2],
+  ["Hospital Básico", 3],
+  ["Unidad de Atención Primaria en Salud", 4],
+  ["Centro Integral de Salud", 5]
+]);
 
 const DIMENSIONES: Record<string, DimensionDefinition> = {
   ANIO: {
@@ -255,10 +322,10 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     alias: "establecimiento",
     type: "string",
     select: ETIQUETA_ESTABLECIMIENTO_SQL,
-    groupBy: "det.C_US, cat_establecimiento.nombre, cat_nivel_establecimiento.descripcion, municipios.D_MUNICIPIO",
+    groupBy: "det.C_US, cat_establecimiento.nombre, us.D_US, cat_nivel_establecimiento.descripcion, municipios.D_MUNICIPIO",
     valueExpr: "det.C_US",
     joins: ["us", "cat_establecimiento", "cat_nivel_establecimiento", "municipios"],
-    orderBy: "cat_establecimiento.nombre",
+    orderBy: "COALESCE(cat_establecimiento.nombre, us.D_US, CAST(det.C_US AS CHAR))",
     catalog: {
       table: "cat_establecimientos",
       valueColumn: "codigo",
@@ -273,11 +340,11 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Región",
     alias: "region",
     type: "string",
-    select: "COALESCE(cat_region.descripcion, CAST(COALESCE(us.C_REGION, det.C_US) AS CHAR))",
-    groupBy: "COALESCE(cat_region.descripcion, CAST(COALESCE(us.C_REGION, det.C_US) AS CHAR))",
+    select: REGION_DESCRIPCION_SQL,
+    groupBy: REGION_DESCRIPCION_SQL,
     valueExpr: "COALESCE(us.C_REGION, det.C_US)",
     joins: ["us", "cat_region"],
-    orderBy: "COALESCE(cat_region.descripcion, CAST(COALESCE(us.C_REGION, det.C_US) AS CHAR))",
+    orderBy: REGION_DESCRIPCION_SQL,
     catalog: {
       table: "cat_regiones",
       valueColumn: "codigo",
@@ -286,23 +353,47 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
       preload: true
     }
   },
+  DEPARTAMENTO: {
+    id: "DEPARTAMENTO",
+    label: "Departamento",
+    alias: "departamento",
+    type: "string",
+    select: "COALESCE(deptos.D_DEPARTAMENTO, CAST(us.C_DEPARTAMENTO AS CHAR))",
+    groupBy: "us.C_DEPARTAMENTO, deptos.D_DEPARTAMENTO",
+    valueExpr: "us.C_DEPARTAMENTO",
+    joins: ["us", "deptos"],
+    orderBy: "deptos.D_DEPARTAMENTO",
+    catalog: {
+      table: "BAS_BDR_DEPARTAMENTOS",
+      valueColumn: "C_DEPARTAMENTO",
+      labelColumn: "D_DEPARTAMENTO",
+      orderBy: "D_DEPARTAMENTO",
+      preload: false,
+      defaultLimit: 30
+    }
+  },
   MUNICIPIO: {
     id: "MUNICIPIO",
     label: "Municipio",
     alias: "municipio",
     type: "string",
-    // Mostrar solo el nombre del municipio (sin departamento) cuando hay filtro de región
-    select: "COALESCE(municipios.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO))",
+    select: `
+      CONCAT(
+        COALESCE(deptos.D_DEPARTAMENTO, CAST(us.C_DEPARTAMENTO AS CHAR)),
+        ' - ',
+        COALESCE(municipios.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO))
+      )
+    `,
     // Agrupar por código único (departamento-municipio) para evitar combinar municipios con el mismo nombre
-    groupBy: "us.C_DEPARTAMENTO, us.C_MUNICIPIO, municipios.D_MUNICIPIO",
+    groupBy: "us.C_DEPARTAMENTO, us.C_MUNICIPIO, deptos.D_DEPARTAMENTO, municipios.D_MUNICIPIO",
     valueExpr: "CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)",
-    joins: ["us", "municipios"],
-    orderBy: "municipios.D_MUNICIPIO",
+    joins: ["us", "deptos", "municipios"],
+    orderBy: "deptos.D_DEPARTAMENTO, municipios.D_MUNICIPIO",
     catalog: {
       table: "BAS_BDR_MUNICIPIOS",
       valueColumn: "CONCAT(C_DEPARTAMENTO, '-', C_MUNICIPIO)",
       labelColumn: "D_MUNICIPIO",
-      orderBy: "C_DEPARTAMENTO, C_MUNICIPIO",
+      orderBy: "D_MUNICIPIO",
       preload: false,
       defaultLimit: 300
     }
@@ -313,15 +404,15 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     alias: "nivel_establecimiento",
     type: "string",
     select: "cat_nivel_establecimiento.descripcion",
-    groupBy: "cat_nivel_establecimiento.descripcion",
+    groupBy: `${NIVEL_ESTABLECIMIENTO_ORDEN_SQL}, cat_nivel_establecimiento.descripcion`,
     valueExpr: "CAST(us.C_NIVEL_US AS CHAR)",
     joins: ["us", "cat_nivel_establecimiento"],
-    orderBy: "cat_nivel_establecimiento.descripcion",
+    orderBy: NIVEL_ESTABLECIMIENTO_ORDEN_SQL,
     catalog: {
       table: "cat_nivel_establecimiento",
       valueColumn: "codigo",
       labelColumn: "descripcion",
-      orderBy: "CAST(codigo AS UNSIGNED)",
+      orderBy: NIVEL_ESTABLECIMIENTO_CATALOGO_ORDEN_SQL,
       preload: true
     }
   },
@@ -330,11 +421,11 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Nivel Operativo",
     alias: "nivel_operativo",
     type: "string",
-    select: "cat_nivel_operativo.descripcion",
-    groupBy: "cat_nivel_operativo.codigo",
-    valueExpr: "cat_nivel_operativo.codigo",
-    joins: ["us", "cat_nivel_operativo"],
-    orderBy: "cat_nivel_operativo.codigo",
+    select: NIVEL_OPERATIVO_DESCRIPCION_SQL,
+    groupBy: `${NIVEL_OPERATIVO_CODIGO_SQL}, ${NIVEL_OPERATIVO_DESCRIPCION_SQL}`,
+    valueExpr: NIVEL_OPERATIVO_CODIGO_SQL,
+    joins: ["us"],
+    orderBy: NIVEL_OPERATIVO_CODIGO_SQL,
     catalog: {
       table: "cat_nivel_operativo",
       valueColumn: "codigo",
@@ -552,7 +643,10 @@ export const obtenerCatalogoPivot = async (): Promise<PivotCatalogo> => {
         };
 
         // La dimensión ANIO está comentada, ya no se usa
-        if (dimension.id === "MES") {
+        if (dimension.id === "NIVEL_OPERATIVO") {
+          base.valores = NIVEL_OPERATIVO_VALORES;
+          base.totalValores = NIVEL_OPERATIVO_VALORES.length;
+        } else if (dimension.id === "MES") {
           const nombresMeses = [
             "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
@@ -568,7 +662,10 @@ export const obtenerCatalogoPivot = async (): Promise<PivotCatalogo> => {
             `SELECT ${dimension.catalog.valueColumn} AS valor, ${dimension.catalog.labelColumn} AS etiqueta FROM ${dimension.catalog.table} ORDER BY ${dimension.catalog.orderBy ?? dimension.catalog.labelColumn} LIMIT ?`,
             [limit]
           );
-          base.valores = rows.map((row) => ({ valor: row.valor, etiqueta: row.etiqueta }));
+          base.valores = rows.map((row) => ({
+            valor: row.valor,
+            etiqueta: limpiarTextoPresentacion(row.etiqueta) as string
+          }));
           base.totalValores = rows.length;
         } else if (dimension.catalog) {
           const [rows] = await pool.query<RowDataPacket[]>(
@@ -688,6 +785,17 @@ export const obtenerValoresDimension = async (
     async () => {
       const pool = tomarPool();
 
+      if (dimensionId === "NIVEL_OPERATIVO") {
+        const texto = busqueda?.trim().toLowerCase() ?? "";
+        const valores = texto
+          ? NIVEL_OPERATIVO_VALORES.filter((item) =>
+              item.etiqueta.toLowerCase().includes(texto) ||
+              String(item.valor).includes(texto)
+            )
+          : NIVEL_OPERATIVO_VALORES;
+        return valores.slice(0, limiteFinal);
+      }
+
       // Caso especial: MUNICIPIO con filtro de región
       if (dimensionId === "REGION" && regionesFiltro.length) {
         const placeholders = regionesFiltro.map(() => "?").join(", ");
@@ -698,7 +806,10 @@ export const obtenerValoresDimension = async (
            ORDER BY descripcion`,
           [...regionesFiltro]
         );
-        return rows.map((row) => ({ valor: row.valor, etiqueta: row.etiqueta }));
+        return rows.map((row) => ({
+          valor: row.valor,
+          etiqueta: limpiarTextoPresentacion(row.etiqueta) as string
+        }));
       }
 
       if (dimensionId === "DEPARTAMENTO" && regionesFiltro.length) {
@@ -726,7 +837,7 @@ export const obtenerValoresDimension = async (
         return rows.map((row) => ({ valor: row.valor, etiqueta: row.etiqueta }));
       }
 
-      if (dimensionId === "MUNICIPIO" && regionesFiltro.length) {
+      if (dimensionId === "MUNICIPIO") {
         return obtenerMunicipiosPorRegion(pool, regionesFiltro, busqueda, limiteFinal);
       }
 
@@ -785,14 +896,16 @@ const obtenerMunicipiosPorRegion = async (
   const condiciones: string[] = [];
   const parametros: Array<string | number> = [];
 
-  // Filtrar por región
-  condiciones.push(`us.C_REGION IN (${filtroRegion.map(() => "?").join(", ")})`);
-  parametros.push(...filtroRegion);
+  // Filtrar por región cuando aplica
+  if (filtroRegion.length) {
+    condiciones.push(`us.C_REGION IN (${filtroRegion.map(() => "?").join(", ")})`);
+    parametros.push(...filtroRegion);
+  }
 
   // Búsqueda opcional
   if (busqueda) {
-    condiciones.push("m.D_MUNICIPIO LIKE ?");
-    parametros.push(`%${busqueda}%`);
+    condiciones.push("(m.D_MUNICIPIO LIKE ? OR d.D_DEPARTAMENTO LIKE ?)");
+    parametros.push(`%${busqueda}%`, `%${busqueda}%`);
   }
 
   const whereClause = condiciones.length ? `WHERE ${condiciones.join(" AND ")}` : "";
@@ -801,13 +914,21 @@ const obtenerMunicipiosPorRegion = async (
   const sql = `
     SELECT DISTINCT
       CONCAT(m.C_DEPARTAMENTO, '-', m.C_MUNICIPIO) AS valor,
-      m.D_MUNICIPIO AS etiqueta
+      CONCAT(
+        COALESCE(d.D_DEPARTAMENTO, CAST(m.C_DEPARTAMENTO AS CHAR)),
+        ' - ',
+        m.D_MUNICIPIO
+      ) AS etiqueta,
+      COALESCE(d.D_DEPARTAMENTO, CAST(m.C_DEPARTAMENTO AS CHAR)) AS departamento_orden,
+      m.D_MUNICIPIO AS municipio_orden
     FROM BAS_BDR_US us
     INNER JOIN BAS_BDR_MUNICIPIOS m 
       ON m.C_DEPARTAMENTO = us.C_DEPARTAMENTO 
       AND m.C_MUNICIPIO = us.C_MUNICIPIO
+    LEFT JOIN BAS_BDR_DEPARTAMENTOS d
+      ON d.C_DEPARTAMENTO = m.C_DEPARTAMENTO
     ${whereClause}
-    ORDER BY m.D_MUNICIPIO
+    ORDER BY departamento_orden, municipio_orden
     LIMIT ?
   `;
   parametros.push(limiteFinal);
@@ -1315,13 +1436,22 @@ const transformarDatosPivot = (
   // Construir encabezados: dimensiones de fila + columnas dinámicas
   const cabecerasFijas = dimensionesFilas;
   const valoresColumnas = new Set<string>();
-  
+  const ordenValoresColumnas: string[] = [];
+  const sortColumnas = new Map<string, string>();
+  const limpiarValorColumna = (valor: unknown) => String(limpiarTextoPresentacion(valor) ?? "");
+
   // Recopilar todos los valores únicos de las dimensiones de columna
   datos.forEach(fila => {
     dimensionesColumnas.forEach(dim => {
-      const valor = String(fila[dim] ?? '');
+      const valor = limpiarValorColumna(fila[dim]);
       if (valor && valor !== 'null' && valor !== 'undefined') {
+        if (!valoresColumnas.has(valor)) {
+          ordenValoresColumnas.push(valor);
+        }
         valoresColumnas.add(valor);
+        if (!sortColumnas.has(valor)) {
+          sortColumnas.set(valor, valor);
+        }
       }
     });
   });
@@ -1345,9 +1475,22 @@ const transformarDatosPivot = (
 
   // Crear encabezados solo con los valores de las columnas (sin el nombre de la métrica)
   const cabecerasColumnas: string[] = [];
-  valoresColumnas.forEach(valorColumna => {
+  const construirClaveColumna = (valorColumna: string, medida: { id: string }) =>
+    medidas.length === 1 ? valorColumna : `${valorColumna}_${medida.id}`;
+
+  const valoresColumnasOrdenados = dimensionesColumnas.includes("NIVEL_ESTABLECIMIENTO")
+    ? ordenValoresColumnas.sort((a, b) => {
+        const ordenA = NIVEL_ESTABLECIMIENTO_ORDEN_ETIQUETA.get(a) ?? 99;
+        const ordenB = NIVEL_ESTABLECIMIENTO_ORDEN_ETIQUETA.get(b) ?? 99;
+        if (ordenA !== ordenB) return ordenA - ordenB;
+        return a.localeCompare(b, "es-HN", { numeric: true });
+      })
+    : Array.from(valoresColumnas).sort((a, b) =>
+        (sortColumnas.get(a) ?? a).localeCompare(sortColumnas.get(b) ?? b, "es-HN", { numeric: true })
+      );
+  valoresColumnasOrdenados.forEach(valorColumna => {
     medidas.forEach(medida => {
-      cabecerasColumnas.push(`${valorColumna}_${medida.id}`);
+      cabecerasColumnas.push(construirClaveColumna(valorColumna, medida));
     });
   });
 
@@ -1379,10 +1522,10 @@ const transformarDatosPivot = (
     
     // Agregar valores de medidas para cada dimensión de columna
     dimensionesColumnas.forEach(dimColumna => {
-      const valorColumna = String(fila[dimColumna] ?? '');
+      const valorColumna = limpiarValorColumna(fila[dimColumna]);
       if (valorColumna && valorColumna !== 'null' && valorColumna !== 'undefined') {
         medidas.forEach(medida => {
-          const claveCelda = `${valorColumna}_${medida.id}`;
+          const claveCelda = construirClaveColumna(valorColumna, medida);
           const valorCrudo = fila[medida.etiqueta] ?? fila[medida.alias];
           // Convertir a número si es string numérico
           const valorNumerico = typeof valorCrudo === "number" 
@@ -1556,6 +1699,9 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
     joins.push(
       "LEFT JOIN BAS_BDR_MUNICIPIOS muni ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO AND muni.C_MUNICIPIO = us.C_MUNICIPIO"
     );
+    joins.push(
+      "LEFT JOIN BAS_BDR_DEPARTAMENTOS dep ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO"
+    );
   }
 
   const selectParts = ["det.C_CONCEPTO AS concepto_codigo"];
@@ -1571,10 +1717,10 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
   if (incluyeMunicipio) {
     selectParts.push("CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo");
     selectParts.push(
-      "COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio"
+      "CONCAT(COALESCE(dep.D_DEPARTAMENTO, CAST(us.C_DEPARTAMENTO AS CHAR)), ' - ', COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO))) AS municipio"
     );
-    groupByParts.push("us.C_DEPARTAMENTO", "us.C_MUNICIPIO", "muni.D_MUNICIPIO");
-    orderByParts.push("municipio");
+    groupByParts.push("us.C_DEPARTAMENTO", "us.C_MUNICIPIO", "dep.D_DEPARTAMENTO", "muni.D_MUNICIPIO");
+    orderByParts.push("dep.D_DEPARTAMENTO", "muni.D_MUNICIPIO");
   }
 
   selectParts.push(`SUM(${TOTAL_EXPRESSION}) AS total_optimized`);
