@@ -4,9 +4,12 @@ import {
   obtenerAniosEgresosTablero,
   obtenerDatosMapaHondurasEgresos,
   obtenerIndicadoresDepartamentoEgresos,
+  obtenerIndicadoresTableroEgresos,
 } from "../servicios/egresos-tablero.servicio";
 import { AlcanceRegionalError, obtenerRegionesPermitidasUsuario, resolverRegionesPermitidas } from "../utilidades/alcance-regional.util";
 import { logger } from "../utilidades/registro.utilidad";
+
+const valueInvalidRegion = (valor: number) => !Number.isInteger(valor) || valor <= 0 || valor > 20;
 
 export const obtenerMapaHondurasEgresosControlador = async (
   request: FastifyRequest,
@@ -102,6 +105,79 @@ export const obtenerIndicadoresDepartamentoEgresosControlador = async (
       });
     }
     logger.error("Error al obtener indicadores hospitalarios por departamento", error);
+    throw error;
+  }
+};
+
+export const obtenerIndicadoresTableroEgresosControlador = async (
+  request: FastifyRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const { anio, departamentoId, regionId, region } = request.query as Record<
+      string,
+      string | string[] | undefined
+    >;
+
+    const anioRaw = Array.isArray(anio) ? anio[0] : anio;
+    const departamentoRaw = Array.isArray(departamentoId) ? departamentoId[0] : departamentoId;
+    const regionIdRaw = Array.isArray(regionId) ? regionId[0] : regionId;
+    const regionRaw = Array.isArray(region) ? region : region ? [region] : [];
+
+    const anioNumero = anioRaw ? Number(anioRaw) : undefined;
+    const departamentoNumero = departamentoRaw ? Number(departamentoRaw) : undefined;
+    const regionesSolicitadas = [
+      ...(regionIdRaw ? [Number(regionIdRaw)] : []),
+      ...regionRaw.map((valor) => Number(valor)),
+    ].filter((valor) => Number.isFinite(valor));
+
+    if (anioRaw !== undefined && (!Number.isFinite(anioNumero) || anioNumero! < 2000 || anioNumero! > 2100)) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El parámetro 'anio' debe ser un número válido entre 2000 y 2100",
+        campos: { anio },
+      });
+    }
+
+    if (departamentoRaw !== undefined && (!Number.isFinite(departamentoNumero) || departamentoNumero! <= 0)) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El parámetro 'departamentoId' debe ser un número válido si se proporciona",
+        campos: { departamentoId },
+      });
+    }
+
+    if (regionesSolicitadas.some((valor) => valueInvalidRegion(valor))) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El parámetro de región debe ser un número válido si se proporciona",
+        campos: { regionId, region },
+      });
+    }
+
+    const regionesPermitidas = resolverRegionesPermitidas(
+      request.usuarioActual,
+      regionesSolicitadas.length ? regionesSolicitadas : undefined
+    );
+
+    const datos = await obtenerIndicadoresTableroEgresos({
+      regionIds: regionesPermitidas ?? undefined,
+      anio: anioNumero,
+      departamentoId: departamentoNumero,
+    });
+
+    return reply.status(200).send({
+      datos,
+      generadoEn: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message,
+      });
+    }
+    logger.error("Error al obtener indicadores hospitalarios optimizados", error);
     throw error;
   }
 };

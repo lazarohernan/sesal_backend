@@ -3,6 +3,7 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   obtenerAniosEgresosTableroControlador,
   obtenerIndicadoresDepartamentoEgresosControlador,
+  obtenerIndicadoresTableroEgresosControlador,
   obtenerMapaHondurasEgresosControlador,
 } from "../controladores/egresos-tablero.controlador";
 import { requerirConfiguracionBD } from "../middleware/configuracion-bd.middleware";
@@ -12,6 +13,7 @@ const egresosTableroRutas: FastifyPluginAsync = async (fastify) => {
 
   fastify.get("/mapahonduras", obtenerMapaHondurasEgresosControlador);
   fastify.get("/anios", obtenerAniosEgresosTableroControlador);
+  fastify.get("/indicadores", obtenerIndicadoresTableroEgresosControlador);
   fastify.get("/indicadores-departamento", obtenerIndicadoresDepartamentoEgresosControlador);
 };
 
