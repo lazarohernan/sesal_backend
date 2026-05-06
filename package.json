@@ -8,6 +8,7 @@
     "start": "node dist/server.js",
     "refresh:tablero-resumen": "node scripts/refrescar-tablero-resumen.js",
     "db:indexes:egresos": "node scripts/crear-indices-egresos.js",
+    "db:optimize:at2-legacy": "node scripts/optimizar-at2-legacy.js",
     "explain:queries": "node scripts/explain-queries.js",
     "sync:bas-bdr-us": "node scripts/sincronizar-bas-bdr-us.js"
   },
