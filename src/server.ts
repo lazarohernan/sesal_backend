@@ -5,6 +5,7 @@ import { logger } from "./utilidades/registro.utilidad";
 import { inicializarPool, pool } from "./base_datos/pool";
 import { configuracionBDServicio } from "./servicios/configuracion-bd.servicio";
 import { authServicio } from "./servicios/auth.servicio";
+import { obtenerIndicadoresTableroEgresos } from "./servicios/egresos-tablero.servicio";
 
 const puerto = entorno.puerto;
 const DEFAULT_PREWARM_YEARS = [2025, 2024, 2023, 2022];
@@ -53,6 +54,14 @@ const precalentarCache = async () => {
 
     await Promise.allSettled(consultas);
     logger.info(`Caché pre-calentado: años ${batch.join(", ")}`);
+  }
+
+  for (let i = 0; i < anios.length; i += concurrencia) {
+    const batch = anios.slice(i, i + concurrencia);
+    await Promise.allSettled(
+      batch.map((anio) => obtenerIndicadoresTableroEgresos({ anio }))
+    );
+    logger.info(`Caché de indicadores de egresos pre-calentado: años ${batch.join(", ")}`);
   }
 
   logger.info(`Caché pre-calentado exitosamente (${anios.length} años)`);
