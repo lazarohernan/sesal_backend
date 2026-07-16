@@ -63,17 +63,12 @@ export const entorno = {
     ),
     conjuntoCaracteres: process.env.MYSQL_CHARSET ?? "utf8mb4"
   },
-  tablero: {
-    tablaHechos: process.env.DB_FACT_TABLE ?? "fact_transactions",
-    columnaMonto: process.env.DB_AMOUNT_COLUMN ?? "amount",
-    columnaFecha: process.env.DB_DATE_COLUMN ?? "transaction_date",
-    columnaCategoria: process.env.DB_CATEGORY_COLUMN ?? "category"
-  },
   cache: {
-    precalentar: booleano(process.env.ENABLE_CACHE_PREWARM, false),
+    precalentar: booleano(process.env.ENABLE_CACHE_PREWARM, process.env.NODE_ENV === "production"),
     precalentarDelayMs: numero(process.env.CACHE_PREWARM_DELAY_MS, 3000),
-    precalentarConcurrencia: Math.max(1, numero(process.env.CACHE_PREWARM_CONCURRENCY, 1)),
-    precalentarAnios: aniosPrecalentamiento
+    precalentarConcurrencia: Math.max(1, numero(process.env.CACHE_PREWARM_CONCURRENCY, 2)),
+    precalentarAnios: aniosPrecalentamiento,
+    precalentarEgresos: booleano(process.env.CACHE_PREWARM_EGRESOS, false)
   },
   trabajos: {
     pivotConcurrencia: Math.max(1, numero(process.env.PIVOT_JOB_CONCURRENCY, 1)),

@@ -2,11 +2,13 @@ import type { RowDataPacket } from "mysql2";
 
 import { obtenerPoolActual } from "../base_datos/pool";
 import { cache, CACHE_TTL } from "../utilidades/cache.utilidad";
+import { CIE_PARTO_CATEGORIAS } from "./egresos-cie.util";
 
 export interface EgresosDepartamentoDato {
   departamentoId: number;
   nombre: string;
   totalHistorico: number;
+  totalesPorAnio: Record<number, number>;
   total2025: number;
   total2024: number;
   total2023: number;
@@ -25,7 +27,15 @@ export interface EgresosIndicadoresDepartamento {
   totalDiagnosticos: number;
   totalOperaciones: number;
   totalPartos: number;
+  totalPartosAdolescentes: number;
   totalUnidades: number;
+  desgloseNiveles: Array<{
+    codigo: number;
+    etiqueta: string;
+    grupo: "Segundo nivel" | "Primer nivel";
+    totalEgresos: number;
+    totalUnidades: number;
+  }>;
 }
 
 export interface EgresosIndicadoresTableroParams {
@@ -41,6 +51,7 @@ export interface EgresosIndicadoresTablero {
     totalDiagnosticos: number;
     totalOperaciones: number;
     totalPartos: number;
+    totalPartosAdolescentes: number;
     referidos: number;
   };
   distribucionSexo: Array<{
@@ -74,6 +85,20 @@ const TABLA_OPERACIONES = "EHO_BDT_EGR_OPERACIONES";
 const TABLA_PARTOS = "EHO_BDT_EGR_PARTOS";
 const TABLA_US = "BAS_BDR_US";
 const TABLA_DEPARTAMENTOS = "BAS_BDR_DEPARTAMENTOS";
+const TABLA_NIVELES_US = "BAS_BDR_NIVELES_US";
+
+const NIVELES_EGRESOS_SOLICITADOS: Array<{
+  codigo: number;
+  etiqueta: string;
+  grupo: "Segundo nivel" | "Primer nivel";
+}> = [
+  { codigo: 1, etiqueta: "Básico", grupo: "Segundo nivel" },
+  { codigo: 2, etiqueta: "General", grupo: "Segundo nivel" },
+  { codigo: 3, etiqueta: "Especialidades", grupo: "Segundo nivel" },
+  { codigo: 4, etiqueta: "Instituto", grupo: "Segundo nivel" },
+  { codigo: 6, etiqueta: "Centro Integral de Salud", grupo: "Primer nivel" },
+  { codigo: 7, etiqueta: "Servicio Materno Infantil", grupo: "Primer nivel" },
+];
 
 const construirFiltroUbicacion = (params: EgresosIndicadoresDepartamentoParams) => {
   const whereParts = ["us.C_DEPARTAMENTO = ?"];
@@ -142,7 +167,11 @@ const construirFiltroTablero = (
 };
 
 const construirCacheKeyTablero = (params: EgresosIndicadoresTableroParams) =>
-  `egresos-tablero:indicadores-v2:${params.regionIds?.join(",") ?? "all"}:${params.departamentoId ?? "hn"}:${params.anio ?? "all"}`;
+  `egresos-tablero:indicadores-v3:${params.regionIds?.length ? [...params.regionIds].sort((a, b) => a - b).join(",") : "all"}:${params.departamentoId ?? "hn"}:${params.anio ?? "all"}`;
+
+const construirCondicionCategoriasParto = (alias: string) => {
+  return `(${CIE_PARTO_CATEGORIAS.map((categoria) => `${alias}.C_CIE LIKE '${categoria}%'`).join(" OR ")})`;
+};
 
 export const obtenerAniosEgresosTablero = async (): Promise<number[]> => {
   return cache.getOrSet(
@@ -163,117 +192,140 @@ export const obtenerAniosEgresosTablero = async (): Promise<number[]> => {
   );
 };
 
-export const obtenerDatosMapaHondurasEgresos = async (regionIds?: number[] | null): Promise<EgresosDepartamentoDato[]> => {
+const mapearDatosMapaEgresos = (
+  departamentos: RowDataPacket[],
+  totalesAnuales: RowDataPacket[]
+): EgresosDepartamentoDato[] => {
+  const porDepartamento = new Map<number, Record<number, number>>();
+
+  totalesAnuales.forEach((row) => {
+    const departamentoId = Number(row.departamentoId);
+    const anio = Number(row.anio);
+    const total = Number(row.total ?? 0);
+    if (!Number.isInteger(departamentoId) || !Number.isInteger(anio)) return;
+
+    const totales = porDepartamento.get(departamentoId) ?? {};
+    totales[anio] = total;
+    porDepartamento.set(departamentoId, totales);
+  });
+
+  return departamentos.map((row) => {
+    const departamentoId = Number(row.departamentoId);
+    const totalesPorAnio = porDepartamento.get(departamentoId) ?? {};
+
+    return {
+      departamentoId,
+      nombre: String(row.nombre),
+      totalHistorico: Number(row.totalHistorico ?? 0),
+      totalesPorAnio,
+      total2025: Number(totalesPorAnio[2025] ?? 0),
+      total2024: Number(totalesPorAnio[2024] ?? 0),
+      total2023: Number(totalesPorAnio[2023] ?? 0),
+      totalUnidades: Number(row.totalUnidades ?? 0),
+    };
+  });
+};
+
+const cargarDatosMapaEgresos = async (regionIds?: number[] | null): Promise<EgresosDepartamentoDato[]> => {
+  const pool = obtenerPoolActual();
+
   if (regionIds?.length) {
-    const pool = obtenerPoolActual();
     const placeholders = regionIds.map(() => "?").join(", ");
-    const [rows] = await pool.query<RowDataPacket[]>(
+    const filtroRegion = `WHERE us.C_REGION IN (${placeholders})`;
+    const paramsRegion = [...regionIds];
+
+    const [departamentos, totalesAnuales] = await Promise.all([
+      pool.query<RowDataPacket[]>(
+        `
+          SELECT
+            us.C_DEPARTAMENTO AS departamentoId,
+            dep.D_DEPARTAMENTO AS nombre,
+            COUNT(*) AS totalHistorico,
+            COUNT(DISTINCT g.C_US) AS totalUnidades
+          FROM ${TABLA_GENERAL} g
+          INNER JOIN ${TABLA_US} us
+            ON us.C_US = g.C_US
+          INNER JOIN ${TABLA_DEPARTAMENTOS} dep
+            ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+          ${filtroRegion}
+          GROUP BY us.C_DEPARTAMENTO, dep.D_DEPARTAMENTO
+          ORDER BY us.C_DEPARTAMENTO
+        `,
+        paramsRegion
+      ),
+      pool.query<RowDataPacket[]>(
+        `
+          SELECT
+            us.C_DEPARTAMENTO AS departamentoId,
+            g.N_ANIO AS anio,
+            COUNT(*) AS total
+          FROM ${TABLA_GENERAL} g
+          INNER JOIN ${TABLA_US} us
+            ON us.C_US = g.C_US
+          ${filtroRegion}
+          GROUP BY us.C_DEPARTAMENTO, g.N_ANIO
+        `,
+        paramsRegion
+      ),
+    ]);
+
+    return mapearDatosMapaEgresos(departamentos[0], totalesAnuales[0]);
+  }
+
+  const [departamentos, totalesAnuales] = await Promise.all([
+    pool.query<RowDataPacket[]>(
+      `
+        SELECT
+          dep.C_DEPARTAMENTO AS departamentoId,
+          dep.D_DEPARTAMENTO AS nombre,
+          COALESCE(hist.totalHistorico, 0) AS totalHistorico,
+          COALESCE(hist.totalUnidades, 0) AS totalUnidades
+        FROM ${TABLA_DEPARTAMENTOS} dep
+        LEFT JOIN (
+          SELECT
+            us.C_DEPARTAMENTO,
+            COUNT(*) AS totalHistorico,
+            COUNT(DISTINCT g.C_US) AS totalUnidades
+          FROM ${TABLA_GENERAL} g
+          INNER JOIN ${TABLA_US} us
+            ON us.C_US = g.C_US
+          GROUP BY us.C_DEPARTAMENTO
+        ) hist
+          ON hist.C_DEPARTAMENTO = dep.C_DEPARTAMENTO
+        WHERE dep.C_DEPARTAMENTO BETWEEN 1 AND 18
+        ORDER BY dep.C_DEPARTAMENTO
+      `
+    ),
+    pool.query<RowDataPacket[]>(
       `
         SELECT
           us.C_DEPARTAMENTO AS departamentoId,
-          dep.D_DEPARTAMENTO AS nombre,
-          COUNT(*) AS totalHistorico,
-          SUM(CASE WHEN g.N_ANIO = 2025 THEN 1 ELSE 0 END) AS total2025,
-          SUM(CASE WHEN g.N_ANIO = 2024 THEN 1 ELSE 0 END) AS total2024,
-          SUM(CASE WHEN g.N_ANIO = 2023 THEN 1 ELSE 0 END) AS total2023,
-          COUNT(DISTINCT g.C_US) AS totalUnidades
+          g.N_ANIO AS anio,
+          COUNT(*) AS total
         FROM ${TABLA_GENERAL} g
         INNER JOIN ${TABLA_US} us
           ON us.C_US = g.C_US
-        INNER JOIN ${TABLA_DEPARTAMENTOS} dep
-          ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO
-        WHERE us.C_REGION IN (${placeholders})
-        GROUP BY us.C_DEPARTAMENTO, dep.D_DEPARTAMENTO
-        ORDER BY us.C_DEPARTAMENTO
-      `,
-      [...regionIds]
-    );
+        GROUP BY us.C_DEPARTAMENTO, g.N_ANIO
+      `
+    ),
+  ]);
 
-    return rows.map((row) => ({
-      departamentoId: Number(row.departamentoId),
-      nombre: String(row.nombre),
-      totalHistorico: Number(row.totalHistorico ?? 0),
-      total2025: Number(row.total2025 ?? 0),
-      total2024: Number(row.total2024 ?? 0),
-      total2023: Number(row.total2023 ?? 0),
-      totalUnidades: Number(row.totalUnidades ?? 0),
-    }));
+  return mapearDatosMapaEgresos(departamentos[0], totalesAnuales[0]);
+};
+
+export const obtenerDatosMapaHondurasEgresos = async (regionIds?: number[] | null): Promise<EgresosDepartamentoDato[]> => {
+  if (regionIds?.length) {
+    const regionKey = [...regionIds].sort((a, b) => a - b).join(",");
+    return cache.getOrSet(
+      `egresos-tablero:mapa:regional:${regionKey}`,
+      () => cargarDatosMapaEgresos(regionIds),
+      CACHE_TTL.DATOS_MAPA
+    );
   }
 
   return cache.getOrSet(
     "egresos-tablero:mapa",
-    async () => {
-      const pool = obtenerPoolActual();
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `
-          SELECT
-            dep.C_DEPARTAMENTO AS departamentoId,
-            dep.D_DEPARTAMENTO AS nombre,
-            COALESCE(hist.totalHistorico, 0) AS totalHistorico,
-            COALESCE(y2025.total2025, 0) AS total2025,
-            COALESCE(y2024.total2024, 0) AS total2024,
-            COALESCE(y2023.total2023, 0) AS total2023,
-            COALESCE(hist.totalUnidades, 0) AS totalUnidades
-          FROM ${TABLA_DEPARTAMENTOS} dep
-          LEFT JOIN (
-            SELECT
-              us.C_DEPARTAMENTO,
-              COUNT(*) AS totalHistorico,
-              COUNT(DISTINCT g.C_US) AS totalUnidades
-            FROM ${TABLA_GENERAL} g
-            INNER JOIN ${TABLA_US} us
-              ON us.C_US = g.C_US
-            GROUP BY us.C_DEPARTAMENTO
-          ) hist
-            ON hist.C_DEPARTAMENTO = dep.C_DEPARTAMENTO
-          LEFT JOIN (
-            SELECT
-              us.C_DEPARTAMENTO,
-              COUNT(*) AS total2025
-            FROM ${TABLA_GENERAL} g
-            INNER JOIN ${TABLA_US} us
-              ON us.C_US = g.C_US
-            WHERE g.N_ANIO = 2025
-            GROUP BY us.C_DEPARTAMENTO
-          ) y2025
-            ON y2025.C_DEPARTAMENTO = dep.C_DEPARTAMENTO
-          LEFT JOIN (
-            SELECT
-              us.C_DEPARTAMENTO,
-              COUNT(*) AS total2024
-            FROM ${TABLA_GENERAL} g
-            INNER JOIN ${TABLA_US} us
-              ON us.C_US = g.C_US
-            WHERE g.N_ANIO = 2024
-            GROUP BY us.C_DEPARTAMENTO
-          ) y2024
-            ON y2024.C_DEPARTAMENTO = dep.C_DEPARTAMENTO
-          LEFT JOIN (
-            SELECT
-              us.C_DEPARTAMENTO,
-              COUNT(*) AS total2023
-            FROM ${TABLA_GENERAL} g
-            INNER JOIN ${TABLA_US} us
-              ON us.C_US = g.C_US
-            WHERE g.N_ANIO = 2023
-            GROUP BY us.C_DEPARTAMENTO
-          ) y2023
-            ON y2023.C_DEPARTAMENTO = dep.C_DEPARTAMENTO
-          WHERE dep.C_DEPARTAMENTO BETWEEN 1 AND 18
-          ORDER BY dep.C_DEPARTAMENTO
-        `
-      );
-
-      return rows.map((row) => ({
-        departamentoId: Number(row.departamentoId),
-        nombre: String(row.nombre),
-        totalHistorico: Number(row.totalHistorico ?? 0),
-        total2025: Number(row.total2025 ?? 0),
-        total2024: Number(row.total2024 ?? 0),
-        total2023: Number(row.total2023 ?? 0),
-        totalUnidades: Number(row.totalUnidades ?? 0),
-      }));
-    },
+    () => cargarDatosMapaEgresos(),
     CACHE_TTL.DATOS_MAPA
   );
 };
@@ -290,40 +342,57 @@ export const obtenerIndicadoresTableroEgresos = async (
       const filtroGeneral = construirFiltroTablero(params, "g");
       const filtroDiagnosticos = construirFiltroTablero(params, "d");
       const filtroOperaciones = construirFiltroTablero(params, "o");
-      const filtroPartos = construirFiltroTablero(params, "p");
+      const filtroPartos = construirFiltroTablero(params, "d");
 
       const resumenSql = `
         SELECT
-          (
-            SELECT COUNT(*)
+          general.totalEgresos,
+          general.estanciaPromedio,
+          diagnosticos.totalDiagnosticos,
+          operaciones.totalOperaciones,
+          partos.totalPartos,
+          adolescentes.totalPartosAdolescentes,
+          general.referidos
+        FROM (
+          SELECT
+            COUNT(*) AS totalEgresos,
+            ROUND(AVG(COALESCE(g.Q_DIAS_ESTANCIA, 0)), 2) AS estanciaPromedio,
+            COALESCE(SUM(CASE WHEN COALESCE(g.C_US_REFERIDO, 0) <> 0 THEN 1 ELSE 0 END), 0) AS referidos
             FROM ${TABLA_GENERAL} g
             ${filtroGeneral.clause}
-          ) AS totalEgresos,
-          (
-            SELECT ROUND(AVG(COALESCE(g.Q_DIAS_ESTANCIA, 0)), 2)
-            FROM ${TABLA_GENERAL} g
-            ${filtroGeneral.clause}
-          ) AS estanciaPromedio,
-          (
-            SELECT COUNT(*)
+        ) general
+        CROSS JOIN (
+          SELECT COUNT(*) AS totalDiagnosticos
             FROM ${TABLA_DIAGNOSTICOS} d
             ${filtroDiagnosticos.clause}
-          ) AS totalDiagnosticos,
-          (
-            SELECT COUNT(*)
+        ) diagnosticos
+        CROSS JOIN (
+          SELECT COUNT(*) AS totalOperaciones
             FROM ${TABLA_OPERACIONES} o
             ${filtroOperaciones.clause}
-          ) AS totalOperaciones,
-          (
-            SELECT COUNT(*)
-            FROM ${TABLA_PARTOS} p
+        ) operaciones
+        CROSS JOIN (
+          SELECT COUNT(DISTINCT CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA)) AS totalPartos
+            FROM ${TABLA_DIAGNOSTICOS} d
             ${filtroPartos.clause}
-          ) AS totalPartos,
-          (
-            SELECT COALESCE(SUM(CASE WHEN COALESCE(g.C_US_REFERIDO, 0) <> 0 THEN 1 ELSE 0 END), 0)
+            ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionCategoriasParto("d")}
+        ) partos
+        CROSS JOIN (
+          SELECT COUNT(*) AS totalPartosAdolescentes
             FROM ${TABLA_GENERAL} g
             ${filtroGeneral.clause}
-          ) AS referidos
+            ${filtroGeneral.clause ? "AND" : "WHERE"} g.C_PAC_EDAD_TIPO = 4
+              AND g.N_PAC_EDAD BETWEEN 10 AND 19
+              AND EXISTS (
+                SELECT 1
+                FROM ${TABLA_DIAGNOSTICOS} d_parto
+                WHERE d_parto.C_US = g.C_US
+                  AND d_parto.N_ANIO = g.N_ANIO
+                  AND d_parto.N_MES = g.N_MES
+                  AND d_parto.N_PAGINA = g.N_PAGINA
+                  AND ${construirCondicionCategoriasParto("d_parto")}
+              )
+        ) adolescentes
       `;
 
       const sexoSql = `
@@ -391,11 +460,12 @@ export const obtenerIndicadoresTableroEgresos = async (
           ON operaciones.mes = meses.mes
         LEFT JOIN (
           SELECT
-            p.N_MES AS mes,
-            COUNT(*) AS totalPartos
-          FROM ${TABLA_PARTOS} p
+            d.N_MES AS mes,
+            COUNT(DISTINCT CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA)) AS totalPartos
+          FROM ${TABLA_DIAGNOSTICOS} d
           ${filtroPartos.clause}
-          GROUP BY p.N_MES
+          ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionCategoriasParto("d")}
+          GROUP BY d.N_MES
         ) partos
           ON partos.mes = meses.mes
         ORDER BY meses.mes
@@ -435,7 +505,6 @@ export const obtenerIndicadoresTableroEgresos = async (
       ] = await Promise.all([
         pool.query<RowDataPacket[]>(resumenSql, [
           ...filtroGeneral.values,
-          ...filtroGeneral.values,
           ...filtroDiagnosticos.values,
           ...filtroOperaciones.values,
           ...filtroPartos.values,
@@ -463,6 +532,7 @@ export const obtenerIndicadoresTableroEgresos = async (
           totalDiagnosticos: Number(resumenRow.totalDiagnosticos ?? 0),
           totalOperaciones: Number(resumenRow.totalOperaciones ?? 0),
           totalPartos: Number(resumenRow.totalPartos ?? 0),
+          totalPartosAdolescentes: Number(resumenRow.totalPartosAdolescentes ?? 0),
           referidos: Number(resumenRow.referidos ?? 0),
         },
         distribucionSexo: sexoRows[0].map((row) => {
@@ -500,7 +570,8 @@ export const obtenerIndicadoresTableroEgresos = async (
 export const obtenerIndicadoresDepartamentoEgresos = async (
   params: EgresosIndicadoresDepartamentoParams
 ): Promise<EgresosIndicadoresDepartamento> => {
-  const cacheKey = `egresos-tablero:indicadores:${params.departamentoId}:${params.regionIds?.join(",") ?? "all"}:${params.anio ?? "all"}`;
+  const regionKey = params.regionIds?.length ? [...params.regionIds].sort((a, b) => a - b).join(",") : "all";
+  const cacheKey = `egresos-tablero:indicadores-v4:${params.departamentoId}:${regionKey}:${params.anio ?? "all"}`;
 
   return cache.getOrSet(
     cacheKey,
@@ -539,12 +610,31 @@ export const obtenerIndicadoresDepartamentoEgresos = async (
             WHERE ${clause}
           ) AS totalOperaciones,
           (
-            SELECT COUNT(*)
-            FROM ${TABLA_PARTOS} base
+            SELECT COUNT(DISTINCT CONCAT_WS(':', base.C_US, base.N_ANIO, base.N_MES, base.N_PAGINA))
+            FROM ${TABLA_DIAGNOSTICOS} base
             INNER JOIN ${TABLA_US} us
               ON us.C_US = base.C_US
             WHERE ${clause}
+              AND ${construirCondicionCategoriasParto("base")}
           ) AS totalPartos,
+          (
+            SELECT COUNT(*)
+            FROM ${TABLA_GENERAL} base
+            INNER JOIN ${TABLA_US} us
+              ON us.C_US = base.C_US
+            WHERE ${clause}
+              AND base.C_PAC_EDAD_TIPO = 4
+              AND base.N_PAC_EDAD BETWEEN 10 AND 19
+              AND EXISTS (
+                SELECT 1
+                FROM ${TABLA_DIAGNOSTICOS} d_parto
+                WHERE d_parto.C_US = base.C_US
+                  AND d_parto.N_ANIO = base.N_ANIO
+                  AND d_parto.N_MES = base.N_MES
+                  AND d_parto.N_PAGINA = base.N_PAGINA
+                  AND ${construirCondicionCategoriasParto("d_parto")}
+              )
+          ) AS totalPartosAdolescentes,
           (
             SELECT COUNT(DISTINCT base.C_US)
             FROM ${TABLA_GENERAL} base
@@ -561,10 +651,32 @@ export const obtenerIndicadoresDepartamentoEgresos = async (
         ...values,
         ...values,
         ...values,
+        ...values,
       ];
 
       const [rows] = await pool.query<RowDataPacket[]>(sql, queryParams);
       const row = rows[0] ?? {};
+      const [desgloseRows] = await pool.query<RowDataPacket[]>(
+        `
+          SELECT
+            us.C_NIVEL_US AS codigo,
+            COALESCE(NULLIF(TRIM(nivel.D_NIVEL_US), ''), CONCAT('Código ', us.C_NIVEL_US)) AS etiqueta,
+            COUNT(*) AS totalEgresos,
+            COUNT(DISTINCT base.C_US) AS totalUnidades
+          FROM ${TABLA_GENERAL} base
+          INNER JOIN ${TABLA_US} us
+            ON us.C_US = base.C_US
+          LEFT JOIN ${TABLA_NIVELES_US} nivel
+            ON nivel.C_NIVEL_US = us.C_NIVEL_US
+          WHERE ${clause}
+            AND us.C_NIVEL_US IN (${NIVELES_EGRESOS_SOLICITADOS.map(() => "?").join(", ")})
+          GROUP BY us.C_NIVEL_US, nivel.D_NIVEL_US
+        `,
+        [...values, ...NIVELES_EGRESOS_SOLICITADOS.map((item) => item.codigo)]
+      );
+      const desglosePorCodigo = new Map<number, RowDataPacket>(
+        desgloseRows.map((item) => [Number(item.codigo), item])
+      );
 
       return {
         totalEgresos: Number(row.totalEgresos ?? 0),
@@ -572,7 +684,19 @@ export const obtenerIndicadoresDepartamentoEgresos = async (
         totalDiagnosticos: Number(row.totalDiagnosticos ?? 0),
         totalOperaciones: Number(row.totalOperaciones ?? 0),
         totalPartos: Number(row.totalPartos ?? 0),
+        totalPartosAdolescentes: Number(row.totalPartosAdolescentes ?? 0),
         totalUnidades: Number(row.totalUnidades ?? 0),
+        desgloseNiveles: NIVELES_EGRESOS_SOLICITADOS.map((nivel) => {
+          const datosNivel = desglosePorCodigo.get(nivel.codigo);
+          const etiquetaCatalogo = datosNivel?.etiqueta ? String(datosNivel.etiqueta) : "";
+          const etiqueta = nivel.codigo >= 6 && etiquetaCatalogo ? etiquetaCatalogo : nivel.etiqueta;
+          return {
+            ...nivel,
+            etiqueta,
+            totalEgresos: Number(datosNivel?.totalEgresos ?? 0),
+            totalUnidades: Number(datosNivel?.totalUnidades ?? 0),
+          };
+        }),
       };
     },
     CACHE_TTL.RESUMEN_TABLERO

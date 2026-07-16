@@ -40,6 +40,11 @@ const indexes = [
     columns: ["N_ANIO", "N_MES"],
   },
   {
+    table: "EHO_BDT_EGR_DIAGNOSTICOS",
+    name: "idx_egr_diag_anio_cie_mes_us_pagina",
+    columns: ["N_ANIO", "C_CIE", "N_MES", "C_US", "N_PAGINA"],
+  },
+  {
     table: "EHO_BDT_EGR_OPERACIONES",
     name: "idx_egr_op_anio_us_mes",
     columns: ["N_ANIO", "C_US", "N_MES", "N_PAGINA"],

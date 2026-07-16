@@ -5,6 +5,7 @@ import fastifyCompress from "@fastify/compress";
 import { randomUUID } from "node:crypto";
 
 import { entorno } from "./configuracion";
+import { pool } from "./base_datos/pool";
 import { registrarRutas } from "./rutas/index.routes";
 import { errorHandler, notFoundHandler, requestIdHook } from "./utilidades/error.utilidad";
 import { simpleRateLimit } from "./utilidades/rate-limit.utilidad";
@@ -69,12 +70,39 @@ export const buildApp = async () => {
   app.addHook("onRequest", simpleRateLimit({ windowMs: 60_000, max: 3000 }));
 
   // --- Health endpoint ---
-  app.get("/salud", async (request, reply) => {
+  app.get("/salud", async () => {
     return {
       estado: "ok",
       servicio: "bi-backend",
       ambiente: entorno.ambiente
     };
+  });
+
+  app.get("/ready", async (_request, reply) => {
+    if (!pool) {
+      return reply.status(503).send({
+        estado: "no_disponible",
+        servicio: "bi-backend",
+        baseDatos: "sin_pool"
+      });
+    }
+
+    try {
+      const connection = await pool.getConnection();
+      await connection.ping();
+      connection.release();
+      return {
+        estado: "ok",
+        servicio: "bi-backend",
+        baseDatos: "ok"
+      };
+    } catch (error) {
+      return reply.status(503).send({
+        estado: "no_disponible",
+        servicio: "bi-backend",
+        baseDatos: error instanceof Error ? error.message : "error_desconocido"
+      });
+    }
   });
 
   // --- API routes ---

@@ -3,6 +3,7 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   marcarSeguimientoRevisadoControlador,
   obtenerDetalleSeguimientoRegionControlador,
+  obtenerMatrizSeguimientoRegionControlador,
   obtenerResumenSeguimientoControlador
 } from "../controladores/seguimiento.controlador";
 import { requerirConfiguracionBD } from "../middleware/configuracion-bd.middleware";
@@ -13,6 +14,7 @@ const seguimientoRutas: FastifyPluginAsync = async (fastify) => {
   fastify.addHook("preHandler", requireSeguimientoAccess);
 
   fastify.get("/resumen", obtenerResumenSeguimientoControlador);
+  fastify.get("/regiones/:regionId/matriz", obtenerMatrizSeguimientoRegionControlador);
   fastify.get("/regiones/:regionId", obtenerDetalleSeguimientoRegionControlador);
   fastify.patch<{ Params: { id: string }; Body: { observaciones?: string } }>(
     "/:id/revisar",

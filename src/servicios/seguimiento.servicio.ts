@@ -1,11 +1,14 @@
 import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 import { obtenerPoolActual } from "../base_datos/pool";
+import { cache } from "../utilidades/cache.utilidad";
+import { obtenerTablaDetalleAt2 } from "./at2-detalle-fuente.servicio";
 import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
 
 const TABLA_SEGUIMIENTO = "AT2_SEGUIMIENTO_ENVIO";
 const NIVELES_HOSPITAL = [1, 2, 3];
 const ESTADOS_VALIDOS = new Set(["no_enviado", "enviado", "revisado"]);
+const SINCRONIZACION_TTL_MS = 5 * 60 * 1000;
 
 type QueryExecutor = Pool | PoolConnection;
 
@@ -25,6 +28,8 @@ export interface DetalleSeguimientoItem {
   id: number | null;
   establecimientoRups: string;
   establecimientoNombre: string;
+  municipioCodigo: string;
+  municipioNombre: string;
   servicio: "general" | "consulta_externa" | "emergencia";
   servicioEtiqueta: string;
   estado: EstadoSeguimiento;
@@ -38,6 +43,8 @@ export interface DetalleSeguimientoRegion {
   region: ResumenSeguimientoRegion;
   items: DetalleSeguimientoItem[];
 }
+
+export type MatrizSeguimientoAnualRegion = Record<number, DetalleSeguimientoRegion>;
 
 interface UpsertSeguimientoInput {
   anio: number;
@@ -56,9 +63,12 @@ interface MarcarRevisionInput {
 
 interface SeguimientoRow extends RowDataPacket {
   id: number | null;
+  mes?: number;
   region_codigo: number;
   establecimiento_rups: string;
   establecimiento_nombre: string;
+  municipio_codigo: string;
+  municipio_nombre: string;
   servicio: "general" | "consulta_externa" | "emergencia";
   estado: EstadoSeguimiento | null;
   fecha_envio: Date | string | null;
@@ -72,8 +82,60 @@ interface SeguimientoRow extends RowDataPacket {
 }
 
 let tablaAsegurada = false;
+const sincronizacionesRecientes = new Map<string, number>();
+const sincronizacionesPendientes = new Map<string, Promise<void>>();
 
 const obtenerExecutor = (executor?: QueryExecutor) => executor ?? obtenerPoolActual();
+
+const ejecutarSincronizacionConCache = async (clave: string, ejecutar: () => Promise<void>) => {
+  const ahora = Date.now();
+  const sincronizadaEn = sincronizacionesRecientes.get(clave);
+  if (sincronizadaEn && ahora - sincronizadaEn < SINCRONIZACION_TTL_MS) {
+    return;
+  }
+
+  const pendiente = sincronizacionesPendientes.get(clave);
+  if (pendiente) {
+    await pendiente;
+    return;
+  }
+
+  const promesa = ejecutar()
+    .then(() => {
+      sincronizacionesRecientes.set(clave, Date.now());
+    })
+    .finally(() => {
+      sincronizacionesPendientes.delete(clave);
+    });
+
+  sincronizacionesPendientes.set(clave, promesa);
+  await promesa;
+};
+
+const asegurarIndice = async (
+  db: QueryExecutor,
+  tabla: string,
+  indice: string,
+  definicion: string
+) => {
+  const [rows] = await db.query<RowDataPacket[]>(
+    `
+      SELECT 1
+      FROM information_schema.statistics
+      WHERE table_schema = DATABASE()
+        AND table_name = ?
+        AND index_name = ?
+      LIMIT 1
+    `,
+    [tabla, indice]
+  );
+
+  if (rows.length > 0) {
+    return;
+  }
+
+  await db.query(`ALTER TABLE ${tabla} ADD INDEX ${indice} ${definicion}`);
+};
 
 const normalizarEstado = (valor: unknown): EstadoSeguimiento => {
   const estado = typeof valor === "string" ? valor : "";
@@ -111,8 +173,13 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       us.C_REGION AS region_codigo,
       CAST(us.C_US AS CHAR) AS establecimiento_rups,
       TRIM(us.D_US) AS establecimiento_nombre,
+      CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo,
+      COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio_nombre,
       'general' AS servicio
     FROM BAS_BDR_US us
+    LEFT JOIN BAS_BDR_MUNICIPIOS muni
+      ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+      AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
       AND (us.C_NIVEL_US NOT IN (${NIVELES_HOSPITAL.join(",")}) OR us.C_NIVEL_US IS NULL)
 
@@ -122,8 +189,13 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       us.C_REGION AS region_codigo,
       CAST(us.C_US AS CHAR) AS establecimiento_rups,
       TRIM(us.D_US) AS establecimiento_nombre,
+      CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo,
+      COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio_nombre,
       'consulta_externa' AS servicio
     FROM BAS_BDR_US us
+    LEFT JOIN BAS_BDR_MUNICIPIOS muni
+      ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+      AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
       AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
 
@@ -133,8 +205,13 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       us.C_REGION AS region_codigo,
       CAST(us.C_US AS CHAR) AS establecimiento_rups,
       TRIM(us.D_US) AS establecimiento_nombre,
+      CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo,
+      COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio_nombre,
       'emergencia' AS servicio
     FROM BAS_BDR_US us
+    LEFT JOIN BAS_BDR_MUNICIPIOS muni
+      ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+      AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
       AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
   )
@@ -165,16 +242,24 @@ export class SeguimientoServicio {
         updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         UNIQUE KEY uq_seguimiento_periodo_establecimiento (anio, mes, establecimiento_rups, servicio),
+        KEY idx_seguimiento_lookup_anual (anio, establecimiento_rups, servicio, mes),
         KEY idx_seguimiento_region_periodo (region_codigo, anio, mes),
         KEY idx_seguimiento_estado_periodo (estado, anio, mes)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
 
+    await asegurarIndice(
+      db,
+      TABLA_SEGUIMIENTO,
+      "idx_seguimiento_lookup_anual",
+      "(anio, establecimiento_rups, servicio, mes)"
+    );
+
     tablaAsegurada = true;
   }
 
   async registrarEnvio(input: UpsertSeguimientoInput, executor?: QueryExecutor) {
-    await this.asegurarTabla();
+    await this.asegurarTabla(executor);
     const db = obtenerExecutor(executor);
 
     await db.query(
@@ -210,10 +295,157 @@ export class SeguimientoServicio {
         input.servicio
       ]
     );
+    cache.deleteByPrefix("reportes:");
+  }
+
+  async sincronizarEnviosDesdeDetalle(anio: number, mes: number, executor?: QueryExecutor) {
+    if (anio < 2026) return;
+
+    await this.asegurarTabla(executor);
+    const db = obtenerExecutor(executor);
+    const tablaDetalle = obtenerTablaDetalleAt2(anio);
+
+    await ejecutarSincronizacionConCache(
+      `seguimiento:${anio}:${mes}`,
+      async () => {
+        await db.query(
+          `
+            INSERT INTO ${TABLA_SEGUIMIENTO} (
+              anio,
+              mes,
+              region_codigo,
+              establecimiento_rups,
+              servicio,
+              estado,
+              fecha_envio,
+              fecha_revision,
+              revisado_por_user_id,
+              revisado_por_nombre,
+              observaciones
+            )
+            SELECT
+              ? AS anio,
+              ? AS mes,
+              us.C_REGION AS region_codigo,
+              CAST(det.C_US AS CHAR) AS establecimiento_rups,
+              CASE
+                WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+                  THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
+                ELSE 'general'
+              END AS servicio,
+              'enviado' AS estado,
+              NOW() AS fecha_envio,
+              NULL AS fecha_revision,
+              NULL AS revisado_por_user_id,
+              NULL AS revisado_por_nombre,
+              NULL AS observaciones
+            FROM ${tablaDetalle} det FORCE INDEX (idx_anio_mes)
+            INNER JOIN BAS_BDR_US us
+              ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(det.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+            WHERE det.N_ANIO = ?
+              AND det.N_MES = ?
+              AND us.C_REGION BETWEEN 1 AND 20
+            GROUP BY
+              us.C_REGION,
+              CAST(det.C_US AS CHAR),
+              CASE
+                WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+                  THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
+                ELSE 'general'
+              END
+            HAVING SUM(
+              COALESCE(det.Q_AT_ENFERMERA_AUX, 0) +
+              COALESCE(det.Q_AT_ENFERMERA_PRO, 0) +
+              COALESCE(det.Q_AT_MEDICO_GEN, 0) +
+              COALESCE(det.Q_AT_MEDICO_ESP, 0)
+            ) > 0
+            ON DUPLICATE KEY UPDATE
+              region_codigo = VALUES(region_codigo),
+              estado = IF(estado = 'revisado', 'revisado', 'enviado'),
+              fecha_envio = COALESCE(fecha_envio, VALUES(fecha_envio))
+          `,
+          [anio, mes, anio, mes]
+        );
+      }
+    );
+  }
+
+  async sincronizarEnviosDesdeDetalleAnual(anio: number, executor?: QueryExecutor) {
+    if (anio < 2026) return;
+
+    await this.asegurarTabla(executor);
+    const db = obtenerExecutor(executor);
+    const tablaDetalle = obtenerTablaDetalleAt2(anio);
+
+    await ejecutarSincronizacionConCache(
+      `seguimiento:${anio}:anual`,
+      async () => {
+        await db.query(
+          `
+        INSERT INTO ${TABLA_SEGUIMIENTO} (
+          anio,
+          mes,
+          region_codigo,
+          establecimiento_rups,
+          servicio,
+          estado,
+          fecha_envio,
+          fecha_revision,
+          revisado_por_user_id,
+          revisado_por_nombre,
+          observaciones
+        )
+        SELECT
+          ? AS anio,
+          det.N_MES AS mes,
+          us.C_REGION AS region_codigo,
+          CAST(det.C_US AS CHAR) AS establecimiento_rups,
+          CASE
+            WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+              THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
+            ELSE 'general'
+          END AS servicio,
+          'enviado' AS estado,
+          NOW() AS fecha_envio,
+          NULL AS fecha_revision,
+          NULL AS revisado_por_user_id,
+          NULL AS revisado_por_nombre,
+          NULL AS observaciones
+        FROM ${tablaDetalle} det FORCE INDEX (idx_anio_mes)
+        INNER JOIN BAS_BDR_US us
+          ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(det.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+        WHERE det.N_ANIO = ?
+          AND det.N_MES BETWEEN 1 AND 12
+          AND us.C_REGION BETWEEN 1 AND 20
+        GROUP BY
+          det.N_MES,
+          us.C_REGION,
+          CAST(det.C_US AS CHAR),
+          CASE
+            WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+              THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
+            ELSE 'general'
+          END
+        HAVING SUM(
+          COALESCE(det.Q_AT_ENFERMERA_AUX, 0) +
+          COALESCE(det.Q_AT_ENFERMERA_PRO, 0) +
+          COALESCE(det.Q_AT_MEDICO_GEN, 0) +
+          COALESCE(det.Q_AT_MEDICO_ESP, 0)
+        ) > 0
+        ON DUPLICATE KEY UPDATE
+          region_codigo = VALUES(region_codigo),
+          estado = IF(estado = 'revisado', 'revisado', 'enviado'),
+          fecha_envio = COALESCE(fecha_envio, VALUES(fecha_envio))
+          `,
+          [anio, anio]
+        );
+      }
+    );
   }
 
   async obtenerResumen(anio: number, mes: number): Promise<ResumenSeguimientoRegion[]> {
     await this.asegurarTabla();
+    await this.sincronizarEnviosDesdeDetalle(anio, mes);
     const pool = obtenerPoolActual();
 
     const [rows] = await pool.query<SeguimientoRow[]>(
@@ -250,6 +482,7 @@ export class SeguimientoServicio {
 
   async obtenerDetalleRegion(anio: number, mes: number, regionCodigo: number): Promise<DetalleSeguimientoRegion> {
     await this.asegurarTabla();
+    await this.sincronizarEnviosDesdeDetalle(anio, mes);
     const pool = obtenerPoolActual();
 
     const [rows] = await pool.query<SeguimientoRow[]>(
@@ -260,6 +493,8 @@ export class SeguimientoServicio {
           base.region_codigo,
           base.establecimiento_rups,
           base.establecimiento_nombre,
+          base.municipio_codigo,
+          base.municipio_nombre,
           base.servicio,
           seg.estado,
           seg.fecha_envio,
@@ -284,6 +519,8 @@ export class SeguimientoServicio {
         id: row.id ? Number(row.id) : null,
         establecimientoRups: String(row.establecimiento_rups),
         establecimientoNombre: String(row.establecimiento_nombre),
+        municipioCodigo: String(row.municipio_codigo ?? ""),
+        municipioNombre: String(row.municipio_nombre ?? "Sin municipio"),
         servicio,
         servicioEtiqueta: mapearServicioEtiqueta(servicio),
         estado: normalizarEstado(row.estado),
@@ -311,6 +548,151 @@ export class SeguimientoServicio {
     return { region, items };
   }
 
+  async obtenerMatrizAnualRegion(anio: number, regionCodigo: number): Promise<MatrizSeguimientoAnualRegion> {
+    await this.asegurarTabla();
+    await this.sincronizarEnviosDesdeDetalleAnual(anio);
+    const pool = obtenerPoolActual();
+
+    const [rows] = await pool.query<SeguimientoRow[]>(
+      `
+        WITH meses AS (
+          SELECT 1 AS mes UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
+          UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8
+          UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12
+        ),
+        base_establecimientos AS (
+          SELECT
+            us.C_REGION AS region_codigo,
+            CAST(us.C_US AS CHAR) AS establecimiento_rups,
+            TRIM(us.D_US) AS establecimiento_nombre,
+            CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo,
+            COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio_nombre,
+            'general' AS servicio
+          FROM BAS_BDR_US us
+          LEFT JOIN BAS_BDR_MUNICIPIOS muni
+            ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+            AND muni.C_MUNICIPIO = us.C_MUNICIPIO
+          WHERE us.C_REGION = ?
+            AND (us.C_NIVEL_US NOT IN (${NIVELES_HOSPITAL.join(",")}) OR us.C_NIVEL_US IS NULL)
+
+          UNION ALL
+
+          SELECT
+            us.C_REGION AS region_codigo,
+            CAST(us.C_US AS CHAR) AS establecimiento_rups,
+            TRIM(us.D_US) AS establecimiento_nombre,
+            CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo,
+            COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio_nombre,
+            'consulta_externa' AS servicio
+          FROM BAS_BDR_US us
+          LEFT JOIN BAS_BDR_MUNICIPIOS muni
+            ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+            AND muni.C_MUNICIPIO = us.C_MUNICIPIO
+          WHERE us.C_REGION = ?
+            AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+
+          UNION ALL
+
+          SELECT
+            us.C_REGION AS region_codigo,
+            CAST(us.C_US AS CHAR) AS establecimiento_rups,
+            TRIM(us.D_US) AS establecimiento_nombre,
+            CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO) AS municipio_codigo,
+            COALESCE(muni.D_MUNICIPIO, CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)) AS municipio_nombre,
+            'emergencia' AS servicio
+          FROM BAS_BDR_US us
+          LEFT JOIN BAS_BDR_MUNICIPIOS muni
+            ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+            AND muni.C_MUNICIPIO = us.C_MUNICIPIO
+          WHERE us.C_REGION = ?
+            AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+        )
+        SELECT
+          meses.mes,
+          seg.id,
+          base.region_codigo,
+          base.establecimiento_rups,
+          base.establecimiento_nombre,
+          base.municipio_codigo,
+          base.municipio_nombre,
+          base.servicio,
+          seg.estado,
+          seg.fecha_envio,
+          seg.fecha_revision,
+          seg.revisado_por_nombre,
+          seg.observaciones
+        FROM meses
+        CROSS JOIN base_establecimientos base
+        LEFT JOIN ${TABLA_SEGUIMIENTO} seg
+          ON seg.anio = ?
+          AND seg.mes = meses.mes
+          AND seg.establecimiento_rups COLLATE utf8mb4_unicode_ci = base.establecimiento_rups COLLATE utf8mb4_unicode_ci
+          AND seg.servicio COLLATE utf8mb4_unicode_ci = base.servicio COLLATE utf8mb4_unicode_ci
+        ORDER BY meses.mes, base.establecimiento_nombre, FIELD(base.servicio, 'general', 'consulta_externa', 'emergencia')
+      `,
+      [regionCodigo, regionCodigo, regionCodigo, anio]
+    );
+
+    const matriz: MatrizSeguimientoAnualRegion = {};
+    for (let mes = 1; mes <= 12; mes += 1) {
+      matriz[mes] = {
+        region: {
+          id: regionCodigo,
+          nombre: REGION_CODE_TO_NAME[regionCodigo] ?? `Region ${regionCodigo}`,
+          enviados: 0,
+          pendientes: 0,
+          revisados: 0,
+          total: 0,
+          estado: "no_enviado"
+        },
+        items: []
+      };
+    }
+
+    rows.forEach((row) => {
+      const mes = Number(row.mes ?? 0);
+      const bucket = matriz[mes];
+      if (!bucket) return;
+
+      const servicio = row.servicio;
+      const item: DetalleSeguimientoItem = {
+        id: row.id ? Number(row.id) : null,
+        establecimientoRups: String(row.establecimiento_rups),
+        establecimientoNombre: String(row.establecimiento_nombre),
+        municipioCodigo: String(row.municipio_codigo ?? ""),
+        municipioNombre: String(row.municipio_nombre ?? "Sin municipio"),
+        servicio,
+        servicioEtiqueta: mapearServicioEtiqueta(servicio),
+        estado: normalizarEstado(row.estado),
+        fechaEnvio: normalizarFecha(row.fecha_envio),
+        fechaRevision: normalizarFecha(row.fecha_revision),
+        revisadoPor: row.revisado_por_nombre ?? null,
+        observaciones: row.observaciones ?? null
+      };
+
+      bucket.items.push(item);
+    });
+
+    Object.values(matriz).forEach((detalle) => {
+      const enviados = detalle.items.filter((item) => item.estado === "enviado" || item.estado === "revisado").length;
+      const revisados = detalle.items.filter((item) => item.estado === "revisado").length;
+      detalle.region = {
+        ...detalle.region,
+        enviados,
+        pendientes: detalle.items.filter((item) => item.estado === "no_enviado").length,
+        revisados,
+        total: detalle.items.length,
+        estado: construirEstadoResumen({
+          total: detalle.items.length,
+          enviados,
+          revisados
+        } as SeguimientoRow)
+      };
+    });
+
+    return matriz;
+  }
+
   async marcarRevisado(input: MarcarRevisionInput) {
     await this.asegurarTabla();
     const pool = obtenerPoolActual();
@@ -333,6 +715,10 @@ export class SeguimientoServicio {
         input.id
       ]
     );
+
+    if (result.affectedRows > 0) {
+      cache.deleteByPrefix("reportes:");
+    }
 
     return result.affectedRows > 0;
   }

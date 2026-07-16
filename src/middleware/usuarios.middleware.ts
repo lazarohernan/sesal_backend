@@ -40,6 +40,18 @@ export const requireRegionalCaptureRole = async (request: FastifyRequest, reply:
   }
 };
 
+export const requireRegistroReadAccess = async (request: FastifyRequest, reply: FastifyReply) => {
+  if (!request.usuarioActual) {
+    return respuestaProhibida(reply, request.id);
+  }
+
+  if (request.usuarioActual.rol === "central" || request.usuarioActual.rol === "regional") {
+    return;
+  }
+
+  return respuestaProhibida(reply, request.id, "No tiene permiso para consultar registros AT2R.");
+};
+
 export const requireSeguimientoAccess = async (request: FastifyRequest, reply: FastifyReply) => {
   if (!request.usuarioActual) {
     return respuestaProhibida(reply, request.id);

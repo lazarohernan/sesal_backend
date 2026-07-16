@@ -1,8 +1,8 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 import { obtenerPoolActual } from "../base_datos/pool";
-import { configuracionBDServicio, type DatabaseConfig } from "../servicios/configuracion-bd.servicio";
+import { configuracionBDServicio } from "../servicios/configuracion-bd.servicio";
 
-export const requerirConfiguracionBD = async (request: FastifyRequest, reply: FastifyReply) => {
+export const requerirConfiguracionBD = async (_request: FastifyRequest, reply: FastifyReply) => {
   try {
     const config = configuracionBDServicio.obtenerConfiguracion();
     const configuracionValida = Boolean(

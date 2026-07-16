@@ -2,6 +2,14 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 
 import { authServicio } from "../servicios/auth.servicio";
 import { construirCookieSesion, construirCookieSesionExpirada } from "../utilidades/auth-cookie.util";
+import {
+  esIdentificadorAuthValido,
+  esPasswordAuthTamanoValido,
+  esTokenAuthValido,
+  leerPasswordAuth,
+  normalizarIdentificadorAuth,
+  normalizarTokenAuth
+} from "../utilidades/auth-input.utilidad";
 
 interface LoginBody {
   identificador?: string;
@@ -32,19 +40,27 @@ const validarPasswordSegura = (password: string) => {
   return null;
 };
 
+const aplicarCabecerasAuth = (reply: FastifyReply) => {
+  reply.header("Cache-Control", "no-store, no-cache, must-revalidate, private");
+  reply.header("Pragma", "no-cache");
+  reply.header("Expires", "0");
+};
+
 export const loginControlador = async (
   request: FastifyRequest<{ Body: LoginBody }>,
   reply: FastifyReply
 ) => {
-  const identificador = request.body?.identificador?.trim() ?? "";
-  const password = request.body?.password ?? "";
+  aplicarCabecerasAuth(reply);
+
+  const identificador = normalizarIdentificadorAuth(request.body?.identificador);
+  const password = leerPasswordAuth(request.body?.password);
   const recordar = Boolean(request.body?.recordar);
 
-  if (!identificador || !password) {
+  if (!esIdentificadorAuthValido(identificador) || !esPasswordAuthTamanoValido(password)) {
     return reply.status(400).send({
       status: 400,
       codigo: "CREDENCIALES_INCOMPLETAS",
-      mensaje: "Debe ingresar usuario y contrasena."
+      mensaje: "Debe ingresar credenciales validas."
     });
   }
 
@@ -64,7 +80,6 @@ export const loginControlador = async (
     });
   }
 
-  reply.header("Cache-Control", "no-store");
   reply.header("Set-Cookie", construirCookieSesion(sesion.token, sesion.maxAgeSeconds));
 
   return reply.send({
@@ -74,6 +89,8 @@ export const loginControlador = async (
 };
 
 export const sessionControlador = async (request: FastifyRequest, reply: FastifyReply) => {
+  aplicarCabecerasAuth(reply);
+
   if (!request.usuarioActual) {
     return reply.status(401).send({
       status: 401,
@@ -82,7 +99,6 @@ export const sessionControlador = async (request: FastifyRequest, reply: Fastify
     });
   }
 
-  reply.header("Cache-Control", "no-store");
   return reply.send({
     autenticado: true,
     usuario: request.usuarioActual
@@ -90,11 +106,12 @@ export const sessionControlador = async (request: FastifyRequest, reply: Fastify
 };
 
 export const logoutControlador = async (request: FastifyRequest, reply: FastifyReply) => {
+  aplicarCabecerasAuth(reply);
+
   if (request.sessionToken) {
     await authServicio.cerrarSesion(request.sessionToken);
   }
 
-  reply.header("Cache-Control", "no-store");
   reply.header("Set-Cookie", construirCookieSesionExpirada());
 
   return reply.send({
@@ -106,7 +123,17 @@ export const passwordResetRequestControlador = async (
   request: FastifyRequest<{ Body: PasswordResetRequestBody }>,
   reply: FastifyReply
 ) => {
-  const identificador = request.body?.identificador?.trim() ?? "";
+  aplicarCabecerasAuth(reply);
+
+  const identificador = normalizarIdentificadorAuth(request.body?.identificador);
+
+  if (identificador && !esIdentificadorAuthValido(identificador)) {
+    return reply.status(400).send({
+      status: 400,
+      codigo: "IDENTIFICADOR_INVALIDO",
+      mensaje: "Debe ingresar un usuario o correo valido."
+    });
+  }
 
   const resultado = await authServicio.solicitarRecuperacion(
     identificador,
@@ -131,8 +158,10 @@ export const passwordResetVerifyControlador = async (
   request: FastifyRequest<{ Querystring: { token?: string } }>,
   reply: FastifyReply
 ) => {
-  const token = request.query?.token?.trim() ?? "";
-  if (!token) {
+  aplicarCabecerasAuth(reply);
+
+  const token = normalizarTokenAuth(request.query?.token);
+  if (!esTokenAuthValido(token)) {
     return reply.status(400).send({
       status: 400,
       codigo: "TOKEN_REQUERIDO",
@@ -159,10 +188,12 @@ export const passwordResetConfirmControlador = async (
   request: FastifyRequest<{ Body: PasswordResetConfirmBody }>,
   reply: FastifyReply
 ) => {
-  const token = request.body?.token?.trim() ?? "";
-  const password = request.body?.password ?? "";
+  aplicarCabecerasAuth(reply);
 
-  if (!token || !password) {
+  const token = normalizarTokenAuth(request.body?.token);
+  const password = leerPasswordAuth(request.body?.password);
+
+  if (!esTokenAuthValido(token) || !esPasswordAuthTamanoValido(password)) {
     return reply.status(400).send({
       status: 400,
       codigo: "DATOS_INCOMPLETOS",
@@ -200,6 +231,8 @@ export const changePasswordControlador = async (
   request: FastifyRequest,
   reply: FastifyReply
 ) => {
+  aplicarCabecerasAuth(reply);
+
   if (!request.usuarioActual) {
     return reply.status(401).send({
       status: 401,
@@ -209,9 +242,9 @@ export const changePasswordControlador = async (
   }
 
   const body = (request.body ?? {}) as ChangePasswordBody;
-  const passwordNueva = body.passwordNueva ?? "";
+  const passwordNueva = leerPasswordAuth(body.passwordNueva);
 
-  if (!passwordNueva) {
+  if (!esPasswordAuthTamanoValido(passwordNueva)) {
     return reply.status(400).send({
       status: 400,
       codigo: "DATOS_INCOMPLETOS",
@@ -242,7 +275,6 @@ export const changePasswordControlador = async (
     });
   }
 
-  reply.header("Cache-Control", "no-store");
   return reply.send({
     ok: true,
     mensaje: "La contrasena se actualizo correctamente.",

@@ -22,7 +22,6 @@ const rutasProtegidas: FastifyPluginAsync = async (fastify) => {
   fastify.register(reportesRutas, { prefix: "/reportes" });
   fastify.register(usuariosRutas, { prefix: "/usuarios" });
   fastify.register(establecimientosRutas, { prefix: "/establecimientos" });
-  fastify.register(healthRutas, { prefix: "/health" });
   fastify.register(registroHospitalarioRutas, { prefix: "/registro-hospitalario" });
   fastify.register(seguimientoRutas, { prefix: "/seguimiento" });
   fastify.register(egresosPivotRutas, { prefix: "/egresos-pivot" });
@@ -31,6 +30,7 @@ const rutasProtegidas: FastifyPluginAsync = async (fastify) => {
 };
 
 export const registrarRutas: FastifyPluginAsync = async (fastify) => {
+  fastify.register(healthRutas, { prefix: "/health" });
   fastify.register(authRutas, { prefix: "/auth" });
   fastify.register(rutasProtegidas);
 };

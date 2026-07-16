@@ -1,24 +1,24 @@
 import type { UsuarioAutenticado } from "../servicios/auth.servicio";
 
 export const REGION_CODE_TO_NAME: Record<number, string> = {
-  1: "Departamental de Atlántida",
-  2: "Departamental de Colón",
-  3: "Departamental de Comayagua",
-  4: "Departamental de Copán",
-  5: "Departamental de Cortés",
-  6: "Departamental de Choluteca",
-  7: "Departamental de El Paraíso",
-  8: "Departamental de Francisco Morazán",
-  9: "Departamental de Gracias a Dios",
-  10: "Departamental de Intibucá",
-  11: "Departamental de Islas de la Bahía",
-  12: "Departamental de La Paz",
-  13: "Departamental de Lempira",
-  14: "Departamental de Ocotepeque",
-  15: "Departamental de Olancho",
-  16: "Departamental de Santa Bárbara",
-  17: "Departamental de Valle",
-  18: "Departamental de Yoro",
+  1: "Región Sanitaria de Atlántida",
+  2: "Región Sanitaria de Colón",
+  3: "Región Sanitaria de Comayagua",
+  4: "Región Sanitaria de Copán",
+  5: "Región Sanitaria de Cortés",
+  6: "Región Sanitaria de Choluteca",
+  7: "Región Sanitaria de El Paraíso",
+  8: "Región Sanitaria de Francisco Morazán",
+  9: "Región Sanitaria de Gracias a Dios",
+  10: "Región Sanitaria de Intibucá",
+  11: "Región Sanitaria de Islas de la Bahía",
+  12: "Región Sanitaria de La Paz",
+  13: "Región Sanitaria de Lempira",
+  14: "Región Sanitaria de Ocotepeque",
+  15: "Región Sanitaria de Olancho",
+  16: "Región Sanitaria de Santa Bárbara",
+  17: "Región Sanitaria de Valle",
+  18: "Región Sanitaria de Yoro",
   19: "Metropolitana del Distrito Central",
   20: "Metropolitana de San Pedro Sula"
 };
@@ -32,7 +32,14 @@ const normalizarTexto = (valor: string) =>
     .trim();
 
 const NOMBRE_A_REGION = new Map<string, number>(
-  Object.entries(REGION_CODE_TO_NAME).map(([codigo, nombre]) => [normalizarTexto(nombre), Number(codigo)])
+  Object.entries(REGION_CODE_TO_NAME).flatMap(([codigo, nombre]) => {
+    const id = Number(codigo);
+    const nombreAnterior = nombre.replace("Región Sanitaria de ", "Departamental de ");
+    return [
+      [normalizarTexto(nombre), id],
+      [normalizarTexto(nombreAnterior), id]
+    ] as Array<[string, number]>;
+  })
 );
 
 export class AlcanceRegionalError extends Error {

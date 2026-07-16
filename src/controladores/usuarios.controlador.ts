@@ -13,6 +13,7 @@ interface CrearUsuarioRegionalBody {
   nombre?: string;
   username?: string;
   email?: string;
+  rol?: string;
   passwordTemporal?: string;
   regiones?: unknown;
   establecimientos?: unknown;
@@ -23,6 +24,7 @@ interface ActualizarUsuarioRegionalBody {
   nombre?: string;
   username?: string;
   email?: string;
+  rol?: string;
   estado?: string;
   regiones?: unknown;
   establecimientos?: unknown;
@@ -71,17 +73,20 @@ export const crearUsuarioRegionalControlador = async (
   const nombre = request.body?.nombre?.trim() ?? "";
   const username = request.body?.username?.trim() ?? "";
   const email = request.body?.email?.trim() ?? "";
+  const rol = request.body?.rol === "central" ? "central" : "regional";
   const passwordTemporal = request.body?.passwordTemporal?.trim() ?? "";
   const regiones = extraerRegiones(request.body?.regiones);
   const establecimientos = extraerRegiones(request.body?.establecimientos);
   const puedeVerSeguimiento = request.body?.puedeVerSeguimiento === true;
 
-  if (!nombre || !username || !email || !passwordTemporal || regiones.length === 0) {
+  if (!nombre || !username || !email || !passwordTemporal || (rol === "regional" && regiones.length === 0)) {
     return responderError(
       reply,
       400,
       "DATOS_INCOMPLETOS",
-      "Debe completar nombre, usuario, correo, regiones y contrasena temporal."
+      rol === "regional"
+        ? "Debe completar nombre, usuario, correo, regiones y contrasena temporal."
+        : "Debe completar nombre, usuario, correo y contrasena temporal."
     );
   }
 
@@ -90,6 +95,7 @@ export const crearUsuarioRegionalControlador = async (
       nombre,
       username,
       email,
+      rol,
       passwordTemporal,
       regiones,
       establecimientos,
@@ -98,7 +104,7 @@ export const crearUsuarioRegionalControlador = async (
 
     return reply.status(201).send({
       ok: true,
-      mensaje: "Usuario regional creado correctamente.",
+      mensaje: rol === "central" ? "Usuario central creado correctamente." : "Usuario regional creado correctamente.",
       usuario: resultado.usuario,
       passwordTemporal: resultado.passwordTemporal
     });
@@ -118,17 +124,20 @@ export const actualizarUsuarioRegionalControlador = async (
   const nombre = request.body?.nombre?.trim() ?? "";
   const username = request.body?.username?.trim() ?? "";
   const email = request.body?.email?.trim() ?? "";
+  const rol = request.body?.rol === "central" ? "central" : "regional";
   const estado = request.body?.estado === "inactivo" ? "inactivo" : "activo";
   const regiones = extraerRegiones(request.body?.regiones);
   const establecimientos = extraerRegiones(request.body?.establecimientos);
   const puedeVerSeguimiento = request.body?.puedeVerSeguimiento === true;
 
-  if (!Number.isInteger(id) || id <= 0 || !nombre || !username || !email || regiones.length === 0) {
+  if (!Number.isInteger(id) || id <= 0 || !nombre || !username || !email || (rol === "regional" && regiones.length === 0)) {
     return responderError(
       reply,
       400,
       "DATOS_INCOMPLETOS",
-      "Debe completar nombre, usuario, correo, estado y regiones."
+      rol === "regional"
+        ? "Debe completar nombre, usuario, correo, estado y regiones."
+        : "Debe completar nombre, usuario, correo y estado."
     );
   }
 
@@ -138,6 +147,7 @@ export const actualizarUsuarioRegionalControlador = async (
       nombre,
       username,
       email,
+      rol,
       estado,
       regiones,
       establecimientos,
@@ -146,7 +156,7 @@ export const actualizarUsuarioRegionalControlador = async (
 
     return reply.send({
       ok: true,
-      mensaje: "Usuario regional actualizado correctamente.",
+      mensaje: usuario.rol === "central" ? "Usuario central actualizado correctamente." : "Usuario regional actualizado correctamente.",
       usuario
     });
   } catch (error) {

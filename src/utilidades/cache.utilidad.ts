@@ -15,7 +15,10 @@ interface CacheStats {
   size: number;
   keys: string[];
   pending: number;
+  maxEntries: number;
 }
+
+const maxCacheEntries = Math.max(0, Number(process.env.CACHE_MAX_ENTRIES ?? 0) || 0);
 
 class MemoryCache {
   private cache: Map<string, CacheEntry<unknown>> = new Map();
@@ -52,6 +55,20 @@ class MemoryCache {
     return entry.data;
   }
 
+  hasFresh(key: string): boolean {
+    const entry = this.cache.get(key);
+    if (!entry) {
+      return false;
+    }
+
+    if (Date.now() > entry.expiresAt) {
+      this.cache.delete(key);
+      return false;
+    }
+
+    return true;
+  }
+
   /**
    * Almacena un valor en el caché
    * @param key Clave del caché
@@ -65,6 +82,7 @@ class MemoryCache {
       expiresAt: now + ttlMs,
       createdAt: now
     });
+    this.evictIfNeeded();
   }
 
   /**
@@ -110,6 +128,22 @@ class MemoryCache {
     return this.cache.delete(key);
   }
 
+  deleteByPrefix(prefix: string): number {
+    let deleted = 0;
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.cache.delete(key);
+        deleted += 1;
+      }
+    }
+    for (const key of this.pending.keys()) {
+      if (key.startsWith(prefix)) {
+        this.pending.delete(key);
+      }
+    }
+    return deleted;
+  }
+
   /**
    * Limpia todo el caché
    */
@@ -131,6 +165,20 @@ class MemoryCache {
     }
   }
 
+  private evictIfNeeded(): void {
+    if (maxCacheEntries === 0) {
+      return;
+    }
+
+    while (this.cache.size > maxCacheEntries) {
+      const oldestKey = this.cache.keys().next().value as string | undefined;
+      if (!oldestKey) {
+        return;
+      }
+      this.cache.delete(oldestKey);
+    }
+  }
+
   /**
    * Obtiene estadísticas del caché
    */
@@ -143,7 +191,8 @@ class MemoryCache {
       misses: this.stats.misses,
       size: this.cache.size,
       keys: includeKeys ? Array.from(this.cache.keys()).slice(0, maxKeys) : [],
-      pending: this.pending.size
+      pending: this.pending.size,
+      maxEntries: maxCacheEntries
     };
   }
 
@@ -191,7 +240,10 @@ export const CACHE_TTL = {
   RESUMEN_TABLERO: 60 * 60 * 1000,
 
   // Datos del mapa (60 minutos)
-  DATOS_MAPA: 60 * 60 * 1000
+  DATOS_MAPA: 60 * 60 * 1000,
+
+  // Reportes oficiales usados para PDF/Excel (5 minutos, con invalidación en escrituras)
+  REPORTES_OFICIALES: 5 * 60 * 1000
 } as const;
 
 // Claves de caché predefinidas

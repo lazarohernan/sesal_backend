@@ -35,7 +35,7 @@ export const obtenerMapaHondurasEgresosControlador = async (
 };
 
 export const obtenerAniosEgresosTableroControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {
@@ -61,10 +61,10 @@ export const obtenerIndicadoresDepartamentoEgresosControlador = async (
     const departamentoNumero = Number(departamentoId);
     const regionNumero = regionId ? Number(regionId) : undefined;
 
-    if (anio !== undefined && (!Number.isFinite(anioNumero) || anioNumero! < 2023 || anioNumero! > 2030)) {
+    if (anio !== undefined && (!Number.isFinite(anioNumero) || anioNumero! < 2009 || anioNumero! > 2030)) {
       return reply.status(400).send({
         codigo: "PARAMETRO_INVALIDO",
-        mensaje: "El parámetro 'anio' debe ser un número válido entre 2023 y 2030",
+        mensaje: "El parámetro 'anio' debe ser un número válido entre 2009 y 2030",
         campos: { anio },
       });
     }

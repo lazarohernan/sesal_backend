@@ -78,6 +78,8 @@ interface PasswordResetRequestResult {
 const TABLA_USUARIOS = "app_usuarios";
 const TABLA_SESIONES = "app_sesiones";
 const TABLA_PASSWORD_RESET = "app_password_resets";
+const PASSWORD_HASH_SENUELO =
+  "scrypt$b669eb503a2c3dbeca033512f5797c76$18b7153fac344cdf30356112b2ea5bb8e1698b188afe1c9019ba901dd53eaa557b2851d3e4517b188944408be9445e2bbc2d4d1182f0c9009c7395eaea36a946";
 
 const normalizarRegiones = (raw: string | string[] | null) => {
   if (!raw) {
@@ -231,6 +233,7 @@ class AuthServicio {
 
     const usuario = rows[0];
     if (!usuario) {
+      await verificarPassword(payload.password, PASSWORD_HASH_SENUELO);
       return null;
     }
 

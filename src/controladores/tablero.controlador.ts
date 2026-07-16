@@ -13,8 +13,12 @@ export const obtenerResumenControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    const { anio } = request.query as Record<string, string | undefined>;
+    reply.header("Cache-Control", "private, no-store");
+    reply.header("Vary", "Cookie, Authorization");
+
+    const { anio, departamentoId } = request.query as Record<string, string | undefined>;
     const anioNumero = anio ? Number(anio) : undefined;
+    const departamentoIdNumero = departamentoId ? Number(departamentoId) : undefined;
 
     if (anio && (!Number.isFinite(anioNumero) || anioNumero! < 2008 || anioNumero! > 2030)) {
       return reply.status(400).send({
@@ -24,8 +28,19 @@ export const obtenerResumenControlador = async (
       });
     }
 
+    if (
+      departamentoId &&
+      (!Number.isInteger(departamentoIdNumero) || departamentoIdNumero! < 1 || departamentoIdNumero! > 18)
+    ) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El parámetro 'departamentoId' debe ser un número válido entre 1 y 18",
+        campos: { departamentoId }
+      });
+    }
+
     const regionesPermitidas = obtenerRegionesPermitidasUsuario(request.usuarioActual);
-    const resumen = await obtenerResumenTablero(anioNumero, regionesPermitidas);
+    const resumen = await obtenerResumenTablero(anioNumero, regionesPermitidas, departamentoIdNumero);
 
     return reply.status(200).send({
       datos: resumen,
@@ -68,7 +83,7 @@ export const obtenerMapaHondurasControlador = async (
 };
 
 export const obtenerAniosDisponiblesControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {

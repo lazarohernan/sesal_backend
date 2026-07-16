@@ -1,6 +1,7 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
 
 import {
+  estaConsultaPivotCacheada,
   ejecutarConsultaPivot,
   obtenerAniosDisponibles,
   obtenerCatalogoPivot,
@@ -29,7 +30,7 @@ const aplicarAlcanceRegionalPayload = (payload: PivotQueryPayload, request: Fast
 };
 
 export const catalogoPivotControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {
@@ -89,7 +90,7 @@ export const valoresDimensionPivotControlador = async (
 };
 
 export const aniosDisponiblesPivotControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {
@@ -109,28 +110,35 @@ export const ejecutarPivotControlador = async (
   reply: FastifyReply
 ) => {
   const payload = aplicarAlcanceRegionalPayload(request.body as PivotQueryPayload, request);
+  const cacheHit = estaConsultaPivotCacheada(payload);
   const startedAt = Date.now();
-  const logId = await registrarInicioConsultaPivot({
-    payload,
-    executionMode: "sync",
-    requestId: request.id,
-    clientIp: request.ip
-  });
+  const logId = cacheHit
+    ? null
+    : await registrarInicioConsultaPivot({
+        payload,
+        executionMode: "sync",
+        requestId: request.id,
+        clientIp: request.ip
+      });
 
   try {
     const resultado = await ejecutarConsultaPivot(payload);
-    await registrarFinConsultaPivot(logId, {
-      status: "completed",
-      durationMs: Date.now() - startedAt,
-      result: resultado
-    });
+    if (!cacheHit) {
+      await registrarFinConsultaPivot(logId, {
+        status: "completed",
+        durationMs: Date.now() - startedAt,
+        result: resultado
+      });
+    }
     return reply.status(200).send({ resultado, generadoEn: new Date().toISOString() });
   } catch (error) {
-    await registrarFinConsultaPivot(logId, {
-      status: "failed",
-      durationMs: Date.now() - startedAt,
-      errorMessage: error instanceof Error ? error.message : "Error al ejecutar consulta pivot"
-    });
+    if (!cacheHit) {
+      await registrarFinConsultaPivot(logId, {
+        status: "failed",
+        durationMs: Date.now() - startedAt,
+        errorMessage: error instanceof Error ? error.message : "Error al ejecutar consulta pivot"
+      });
+    }
     if (error instanceof AlcanceRegionalError) {
       return reply.status(error.statusCode).send({
         codigo: error.codigo,
@@ -210,7 +218,7 @@ export const mesesOcupadosControlador = async (
 };
 
 export const estadisticasCacheControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   const stats = cache.getStats();

@@ -6,9 +6,17 @@ import { inicializarPool, pool } from "./base_datos/pool";
 import { configuracionBDServicio } from "./servicios/configuracion-bd.servicio";
 import { authServicio } from "./servicios/auth.servicio";
 import { obtenerIndicadoresTableroEgresos } from "./servicios/egresos-tablero.servicio";
+import {
+  ejecutarConsultaPivot,
+  obtenerAniosDisponibles,
+  obtenerCatalogoPivot
+} from "./servicios/pivot.servicio";
+import { obtenerResumenTablero } from "./servicios/tablero.servicio";
 
 const puerto = entorno.puerto;
-const DEFAULT_PREWARM_YEARS = [2025, 2024, 2023, 2022];
+const DEFAULT_PREWARM_YEARS = Array.from({ length: 18 }, (_, index) => 2025 - index);
+let prewarmTimer: NodeJS.Timeout | null = null;
+let detenerPrewarm = false;
 
 const construirAniosPrecalentamiento = () => {
   if (entorno.cache.precalentarAnios.length > 0) {
@@ -19,15 +27,12 @@ const construirAniosPrecalentamiento = () => {
 };
 
 const precalentarCache = async () => {
-  const base = `http://127.0.0.1:${puerto}`;
-  const signal = AbortSignal.timeout(15_000);
-
   logger.info("Pre-calentando caché...");
 
   await Promise.allSettled([
-    fetch(`${base}/api/tablero/anios`, { signal }),
-    fetch(`${base}/api/tablero/resumen`, { signal }),
-    fetch(`${base}/api/pivot/catalogo`, { signal })
+    obtenerAniosDisponibles(),
+    obtenerResumenTablero(),
+    obtenerCatalogoPivot()
   ]);
   logger.info("Caché fase 1 listo (catálogos)");
 
@@ -35,33 +40,43 @@ const precalentarCache = async () => {
   const concurrencia = entorno.cache.precalentarConcurrencia;
 
   for (let i = 0; i < anios.length; i += concurrencia) {
+    if (detenerPrewarm) {
+      logger.info("Pre-calentamiento de caché detenido por apagado del servidor");
+      return;
+    }
+
     const batch = anios.slice(i, i + concurrencia);
-    const consultas = batch.map((anio) =>
-      fetch(`${base}/api/pivot/consulta`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(30_000),
-        body: JSON.stringify({
-          filters: [],
-          rows: ["CONCEPTO_ORDENADO"],
-          values: [{ field: "TOTAL", aggregation: "SUM" }],
-          years: [anio],
-          limit: 100,
-          includeTotals: true
-        })
+    const consultas = batch.flatMap((anio) => [
+      obtenerResumenTablero(anio),
+      ejecutarConsultaPivot({
+        filters: [],
+        rows: ["CONCEPTO_ORDENADO"],
+        values: [{ field: "TOTAL", aggregation: "SUM" }],
+        years: [anio],
+        limit: 100,
+        includeTotals: true
       })
-    );
+    ]);
 
     await Promise.allSettled(consultas);
     logger.info(`Caché pre-calentado: años ${batch.join(", ")}`);
   }
 
-  for (let i = 0; i < anios.length; i += concurrencia) {
-    const batch = anios.slice(i, i + concurrencia);
-    await Promise.allSettled(
-      batch.map((anio) => obtenerIndicadoresTableroEgresos({ anio }))
-    );
-    logger.info(`Caché de indicadores de egresos pre-calentado: años ${batch.join(", ")}`);
+  if (entorno.cache.precalentarEgresos) {
+    for (let i = 0; i < anios.length; i += concurrencia) {
+      if (detenerPrewarm) {
+        logger.info("Pre-calentamiento de egresos detenido por apagado del servidor");
+        return;
+      }
+
+      const batch = anios.slice(i, i + concurrencia);
+      await Promise.allSettled(
+        batch.map((anio) => obtenerIndicadoresTableroEgresos({ anio }))
+      );
+      logger.info(`Caché de indicadores de egresos pre-calentado: años ${batch.join(", ")}`);
+    }
+  } else {
+    logger.info("Pre-calentamiento de indicadores de egresos deshabilitado");
   }
 
   logger.info(`Caché pre-calentado exitosamente (${anios.length} años)`);
@@ -89,11 +104,12 @@ const iniciar = async () => {
     logger.info(`Servidor BI SESAL escuchando en puerto ${puerto}`);
 
     if (entorno.cache.precalentar) {
-      setTimeout(() => {
+      prewarmTimer = setTimeout(() => {
         void precalentarCache().catch((e) => {
           logger.warn("Error pre-calentando caché:", e instanceof Error ? e.message : "desconocido");
         });
       }, entorno.cache.precalentarDelayMs);
+      prewarmTimer.unref();
     } else {
       logger.info("Pre-calentamiento de caché deshabilitado");
     }
@@ -104,6 +120,11 @@ const iniciar = async () => {
 
   const shutdown = async (signal: string) => {
     logger.info(`Recibida senal ${signal}. Cerrando servidor...`);
+    detenerPrewarm = true;
+    if (prewarmTimer) {
+      clearTimeout(prewarmTimer);
+      prewarmTimer = null;
+    }
     await app.close();
     if (pool) {
       await pool.end();

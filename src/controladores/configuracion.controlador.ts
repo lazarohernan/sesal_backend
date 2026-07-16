@@ -163,7 +163,7 @@ export const saveDatabaseConfig = async (
 };
 
 export const getSavedDatabaseConfig = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {
@@ -184,7 +184,7 @@ export const getSavedDatabaseConfig = async (
 };
 
 export const deleteDatabaseConfig = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {

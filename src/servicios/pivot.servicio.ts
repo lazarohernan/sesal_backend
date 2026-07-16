@@ -4,10 +4,13 @@ import type { Pool } from "mysql2/promise";
 import { obtenerPoolActual } from "../base_datos/pool";
 import { cache, CACHE_TTL, CACHE_KEYS } from "../utilidades/cache.utilidad";
 import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
+import {
+  construirFuenteDetalleAt2,
+  obtenerAniosDetalleAt2Disponibles,
+  obtenerTablaDetalleAt2
+} from "./at2-detalle-fuente.servicio";
 
 const tomarPool = () => obtenerPoolActual();
-
-const TABLA_DETALLE = "AT2_DETALLE";
 
 type JoinKey =
   | "us"
@@ -194,36 +197,41 @@ const NIVEL_OPERATIVO_VALORES = [
   { valor: "001", etiqueta: "Primer Nivel de Atención" },
   { valor: "002", etiqueta: "Segundo Nivel de Atención" }
 ];
+// El catálogo historico conserva "Tercer Nivel de Atención" (codigo 3), pero SESAL
+// indico que no debe exponerse en AT2R porque no se utiliza como categoria vigente.
 
 const NIVEL_ESTABLECIMIENTO_ORDEN_SQL = `
   CASE CAST(us.C_NIVEL_US AS UNSIGNED)
-    WHEN 3 THEN 1
+    WHEN 1 THEN 1
     WHEN 2 THEN 2
-    WHEN 1 THEN 3
-    WHEN 5 THEN 4
-    WHEN 6 THEN 5
+    WHEN 3 THEN 3
+    WHEN 16 THEN 4
+    WHEN 5 THEN 5
+    WHEN 6 THEN 6
     ELSE 99
   END
 `;
 
 const NIVEL_ESTABLECIMIENTO_CATALOGO_ORDEN_SQL = `
   CASE CAST(codigo AS UNSIGNED)
-    WHEN 3 THEN 1
+    WHEN 1 THEN 1
     WHEN 2 THEN 2
-    WHEN 1 THEN 3
-    WHEN 5 THEN 4
-    WHEN 6 THEN 5
+    WHEN 3 THEN 3
+    WHEN 16 THEN 4
+    WHEN 5 THEN 5
+    WHEN 6 THEN 6
     ELSE 99
   END,
   descripcion
 `;
 
 const NIVEL_ESTABLECIMIENTO_ORDEN_ETIQUETA = new Map<string, number>([
-  ["Hospital de Especialidades", 1],
+  ["Hospital Básico", 1],
   ["Hospital General", 2],
-  ["Hospital Básico", 3],
-  ["Unidad de Atención Primaria en Salud", 4],
-  ["Centro Integral de Salud", 5]
+  ["Hospital de Especialidades", 3],
+  ["Instituto Hondureño de Seguridad Social", 4],
+  ["Unidad de Atención Primaria en Salud", 5],
+  ["Centro Integral de Salud", 6]
 ]);
 
 const DIMENSIONES: Record<string, DimensionDefinition> = {
@@ -547,14 +555,6 @@ const MEDIDAS: Record<string, MeasureDefinition> = {
     expression: "COALESCE(det.Q_AT_MEDICO_ESP, 0)",
     defaultAggregation: "SUM",
     valueType: "number"
-  },
-  MES: {
-    id: "MES",
-    label: "Mes",
-    description: "Mes del registro",
-    expression: "COALESCE(det.N_MES, 0)",
-    defaultAggregation: "SUM",
-    valueType: "number"
   }
 };
 
@@ -566,20 +566,7 @@ const DEFAULT_LIMIT_PIVOT = 100000;
 const MAX_LIMIT = 500000;
 
 const obtenerTablasDetalleDisponibles = async (): Promise<number[]> => {
-  return cache.getOrSet(
-    CACHE_KEYS.TABLAS_DETALLE,
-    async () => {
-      const pool = tomarPool();
-      const [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT DISTINCT N_ANIO AS anio FROM ${TABLA_DETALLE} ORDER BY N_ANIO`
-      );
-      return rows
-        .map((row) => Number(row.anio))
-        .filter((year) => Number.isFinite(year))
-        .sort((a, b) => a - b);
-    },
-    CACHE_TTL.ANIOS_DISPONIBLES
-  );
+  return obtenerAniosDetalleAt2Disponibles();
 };
 
 const asegurarJoins = (joinsNecesarios: Set<JoinKey>): string => {
@@ -594,22 +581,20 @@ const obtenerPeriodosDisponibles = async (): Promise<Array<{ anio: number; meses
     CACHE_KEYS.PERIODOS_DISPONIBLES,
     async () => {
       const pool = tomarPool();
-
-      const [filas] = await pool.query<RowDataPacket[]>(
-        `SELECT DISTINCT N_ANIO AS anio
-         FROM ${TABLA_DETALLE}
-         ORDER BY N_ANIO DESC`
-      );
+      const aniosDisponibles = await obtenerAniosDetalleAt2Disponibles();
 
       const periodos: Array<{ anio: number; meses: number[] }> = [];
 
-      for (const fila of filas) {
-        const anio = Number(fila.anio);
-        if (!Number.isFinite(anio)) continue;
+      for (const anio of aniosDisponibles.sort((a, b) => b - a)) {
+        const tablaDetalle = obtenerTablaDetalleAt2(anio);
+        const [meses] = await pool.query<RowDataPacket[]>(
+          `SELECT DISTINCT N_MES AS mes FROM ${tablaDetalle} WHERE N_ANIO = ? ORDER BY N_MES`,
+          [anio]
+        );
 
         periodos.push({
           anio,
-          meses: []
+          meses: meses.map((fila) => Number(fila.mes)).filter((mes) => Number.isFinite(mes))
         });
       }
 
@@ -723,8 +708,9 @@ export const obtenerMesesOcupados = async (anio: number): Promise<number[]> => {
     async () => {
       const pool = tomarPool();
       try {
+        const tablaDetalle = obtenerTablaDetalleAt2(anio);
         const [rows] = await pool.query<RowDataPacket[]>(
-          `SELECT DISTINCT N_MES AS mes FROM ${TABLA_DETALLE} WHERE N_ANIO = ? ORDER BY mes`,
+          `SELECT DISTINCT N_MES AS mes FROM ${tablaDetalle} WHERE N_ANIO = ? ORDER BY mes`,
           [anio]
         );
         return rows.map(r => Number(r.mes));
@@ -1165,8 +1151,8 @@ const normalizarValoresFiltro = (dimension: DimensionDefinition, valores?: Array
   return valores.map((valor) => String(valor));
 };
 
-// La tabla unificada AT2_DETALLE usa particiones por año.
-// MySQL hace partition pruning automático con WHERE N_ANIO IN (...).
+// El detalle AT2 se consulta desde tablas anuales originales.
+// Para consultas multi-año se construye un UNION ALL solo con los años solicitados.
 
 const construirSeleccionMedidas = (valores: PivotValueRequest[]) => {
   return valores.map((valor, indice) => {
@@ -1293,7 +1279,10 @@ const limpiarTextoPresentacion = (valor: unknown): unknown => {
   if (typeof valor !== "string") return valor;
   const sinControl = valor.replace(/[\r\n\t]/g, " ").replace(/\s+/g, " ").trim();
   if (!sinControl) return "";
-  return sinControl.replace(/^"(.*)"$/, "$1").trim();
+  return sinControl
+    .replace(/^"(.*)"$/, "$1")
+    .trim()
+    .replace(/^Departamental de /, "Región Sanitaria de ");
 };
 
 const limpiarFilaSalida = (fila: Record<string, unknown>): Record<string, unknown> => {
@@ -1306,6 +1295,49 @@ const limpiarFilaSalida = (fila: Record<string, unknown>): Record<string, unknow
 
 const limpiarFilasSalida = (filas: Array<Record<string, unknown>>): Array<Record<string, unknown>> => {
   return filas.map((fila) => limpiarFilaSalida(fila));
+};
+
+const limpiarMunicipioJerarquico = (valor: unknown, departamento: unknown): unknown => {
+  if (typeof valor !== "string" || typeof departamento !== "string") return valor;
+  const prefijo = `${departamento.trim()} - `;
+  return valor.startsWith(prefijo) ? valor.slice(prefijo.length).trim() : valor;
+};
+
+const limpiarEstablecimientoJerarquico = (valor: unknown, municipio: unknown): unknown => {
+  if (typeof valor !== "string" || typeof municipio !== "string") return valor;
+  const municipioLimpio = municipio.includes(" - ")
+    ? municipio.split(" - ").pop()?.trim()
+    : municipio.trim();
+  if (!municipioLimpio) return valor;
+
+  const sufijoMunicipio = ` - ${municipioLimpio}`;
+  return valor.endsWith(sufijoMunicipio)
+    ? valor.slice(0, -sufijoMunicipio.length).trim()
+    : valor;
+};
+
+const aplicarJerarquiaTerritorialSalida = (
+  filas: Array<Record<string, unknown>>,
+  dimensionesFilas: string[]
+): Array<Record<string, unknown>> => {
+  const incluyeDepartamento = dimensionesFilas.includes("DEPARTAMENTO");
+  const incluyeMunicipio = dimensionesFilas.includes("MUNICIPIO");
+  const incluyeEstablecimiento = dimensionesFilas.includes("ESTABLECIMIENTO");
+
+  return filas.map((fila) => {
+    const salida = { ...fila };
+
+    if (incluyeDepartamento && incluyeMunicipio) {
+      salida.MUNICIPIO = limpiarMunicipioJerarquico(salida.MUNICIPIO, salida.DEPARTAMENTO);
+    }
+
+    if (incluyeMunicipio && incluyeEstablecimiento) {
+      salida.ESTABLECIMIENTO = limpiarEstablecimientoJerarquico(salida.ESTABLECIMIENTO, salida.MUNICIPIO);
+    }
+
+    delete salida.MUNICIPIO_CODIGO;
+    return salida;
+  });
 };
 
 interface ConceptoOrdenadoMetadata {
@@ -1557,7 +1589,7 @@ const transformarDatosPivot = (
   });
 
   // Calcular totales por columna
-  const totales = cabeceras.map((cabecera, index) => {
+  const totales = cabeceras.map((_cabecera, index) => {
     if (index < dimensionesFilas.length) {
       return index === 0 ? 'Total' : null;
     }
@@ -1579,15 +1611,14 @@ const transformarDatosPivot = (
 };
 
 const construirTotalGeneralPivotado = (
-  datosTransformados: Array<Record<string, unknown>>,
+  cabeceras: string[],
   totalesPivotados: unknown[]
 ): Record<string, unknown> | null => {
-  if (!datosTransformados.length || !totalesPivotados.length) {
+  if (!cabeceras.length || !totalesPivotados.length) {
     return null;
   }
 
   const totalGeneral: Record<string, unknown> = {};
-  const cabeceras = Object.keys(datosTransformados[0]);
   cabeceras.forEach((cabecera, index) => {
     totalGeneral[cabecera] = totalesPivotados[index] ?? null;
   });
@@ -1602,7 +1633,7 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
   const columnas = payload.columns ?? [];
   const valores = payload.values ?? [];
   const filtros = payload.filters ?? [];
-  const columnasPermitidas = new Set(["REGION", "MUNICIPIO"]);
+  const columnasPermitidas = new Set(["ANIO", "REGION", "MUNICIPIO"]);
   const filtrosPermitidos = new Set([
     "ANIO",
     "REGION",
@@ -1627,6 +1658,8 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
   }
 
   const aniosConsulta = await resolverAniosConsultaPivot(payload);
+  const fromDetalle = construirFuenteDetalleAt2(aniosConsulta);
+  const incluyeAnio = columnas.includes("ANIO");
   const incluyeRegion = columnas.includes("REGION");
   const incluyeMunicipio = columnas.includes("MUNICIPIO");
   const limitePorDefecto = columnas.length > 0 ? DEFAULT_LIMIT_PIVOT : DEFAULT_LIMIT;
@@ -1708,6 +1741,12 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
   const groupByParts = ["det.C_CONCEPTO"];
   const orderByParts = ["LPAD(det.C_CONCEPTO, 10, '0')"];
 
+  if (incluyeAnio) {
+    selectParts.push("det.N_ANIO AS anio");
+    groupByParts.push("det.N_ANIO");
+    orderByParts.push("det.N_ANIO");
+  }
+
   if (incluyeRegion) {
     selectParts.push("us.C_REGION AS region_codigo");
     groupByParts.push("us.C_REGION");
@@ -1727,8 +1766,8 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
 
   const sql = `SELECT
   ${selectParts.join(",\n  ")}
-FROM ${TABLA_DETALLE} det
-${joins.join("\n")}
+	FROM ${fromDetalle}
+	${joins.join("\n")}
 WHERE ${condiciones.join(" AND ")}
 GROUP BY ${groupByParts.join(", ")}
 ORDER BY ${orderByParts.join(", ")}
@@ -1750,6 +1789,10 @@ LIMIT ${limit}`;
       "Total de Atenciones": Number(row.total_optimized ?? 0),
       concepto_sort_key: metadata?.sortKey ?? construirSortKeyConcepto(codigoConcepto)
     };
+
+    if (incluyeAnio) {
+      objeto.ANIO = Number(row.anio);
+    }
 
     if (incluyeRegion) {
       const codigoRegion = Number(row.region_codigo);
@@ -1779,6 +1822,7 @@ LIMIT ${limit}`;
 
   datosNormalizados.forEach((fila) => {
     delete fila.concepto_sort_key;
+    delete fila.total_optimized;
   });
 
   let datosTransformados: Array<Record<string, unknown>> = datosNormalizados;
@@ -1796,20 +1840,22 @@ LIMIT ${limit}`;
       return objeto;
     });
 
-    totalGeneral = construirTotalGeneralPivotado(datosTransformados, totalesPivotados);
+    totalGeneral = construirTotalGeneralPivotado(pivotResult.cabeceras, totalesPivotados);
   } else if (payload.includeTotals) {
     const totalSql = `SELECT SUM(${TOTAL_EXPRESSION}) AS total_optimized
-FROM ${TABLA_DETALLE} det
-${joins.join("\n")}
-WHERE ${condiciones.join(" AND ")}`;
+	FROM ${fromDetalle}
+	${joins.join("\n")}
+	WHERE ${condiciones.join(" AND ")}`;
     const [totales] = await pool.query<RowDataPacket[]>(totalSql, parametros);
     totalGeneral = {
       "Total de Atenciones": Number(totales[0]?.total_optimized ?? 0)
     };
   }
 
+  const datosSalida = aplicarJerarquiaTerritorialSalida(datosTransformados, filas);
+
   return {
-    datos: limpiarFilasSalida(datosTransformados),
+    datos: limpiarFilasSalida(datosSalida),
     totalGeneral: totalGeneral ? limpiarFilaSalida(totalGeneral) : null,
     aniosConsultados: aniosConsulta,
     metadata: {
@@ -1919,20 +1965,34 @@ async function ejecutarConsultaAgregada(payload: PivotQueryPayload): Promise<Piv
 const generarClaveCachePivot = (payload: PivotQueryPayload): string => {
   // Usar years si está definido, sino year, sino 'all'
   const aniosKey = payload.years?.length 
-    ? `ys:${payload.years.sort((a,b) => a-b).join(',')}` 
+    ? `ys:${[...payload.years].sort((a,b) => a-b).join(',')}`
     : `y:${payload.year ?? 'all'}`;
+
+  const filtrosKey = (payload.filters ?? [])
+    .map((filtro) => {
+      const valores = [...(filtro.values ?? [])]
+        .map((valor) => String(valor))
+        .sort((a, b) => a.localeCompare(b, "es-HN", { numeric: true }));
+      return `${filtro.field}:${valores.join('|')}`;
+    })
+    .sort()
+    .join(',');
   
   const partes = [
     aniosKey,
-    `r:${(payload.rows ?? []).sort().join(',')}`,
-    `c:${(payload.columns ?? []).sort().join(',')}`,
-    `v:${(payload.values ?? []).map(v => `${v.field}:${v.aggregation ?? 'default'}`).sort().join(',')}`,
-    `f:${(payload.filters ?? []).map(f => `${f.field}:${(f.values ?? []).sort().join('|')}`).sort().join(',')}`,
+    // El orden de filas, columnas y medidas forma parte de la presentación del reporte.
+    `r:${(payload.rows ?? []).join(',')}`,
+    `c:${(payload.columns ?? []).join(',')}`,
+    `v:${(payload.values ?? []).map(v => `${v.field}:${v.aggregation ?? 'default'}`).join(',')}`,
+    `f:${filtrosKey}`,
     `l:${payload.limit ?? 'default'}`,
     `t:${payload.includeTotals ?? false}`
   ];
   return `pivot:query:${partes.join(':')}`;
 };
+
+export const estaConsultaPivotCacheada = (payload: PivotQueryPayload): boolean =>
+  cache.hasFresh(generarClaveCachePivot(payload));
 
 export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise<PivotQueryResult> {
   const claveCache = generarClaveCachePivot(payload);
@@ -1986,7 +2046,7 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
 
       const aniosConsulta = await resolverAniosConsultaPivot(payload);
 
-      const fromDetalle = `${TABLA_DETALLE} det`;
+      const fromDetalle = construirFuenteDetalleAt2(aniosConsulta);
       const anioPlaceholders = aniosConsulta.map(() => "?").join(", ");
       condiciones.unshift(`det.N_ANIO IN (${anioPlaceholders})`);
       parametros.unshift(...aniosConsulta);
@@ -2063,6 +2123,7 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
       });
 
       let totalesPivotados: unknown[] = [];
+      let cabecerasPivotadas: string[] = [];
 
       if (columnas.length > 0) {
         const pivotResult = transformarDatosPivot(
@@ -2071,6 +2132,8 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
           columnas,
           medidas
         );
+
+        cabecerasPivotadas = pivotResult.cabeceras;
 
         datosTransformados = pivotResult.filas.map((fila) => {
           const objeto: Record<string, unknown> = {};
@@ -2086,11 +2149,11 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
       }
 
       const totalGeneralFinal = columnas.length > 0 && totalesPivotados.length > 0
-        ? construirTotalGeneralPivotado(datosTransformados, totalesPivotados)
+        ? construirTotalGeneralPivotado(cabecerasPivotadas, totalesPivotados)
         : totalGeneral;
 
       return {
-        datos: limpiarFilasSalida(datosTransformados),
+        datos: limpiarFilasSalida(aplicarJerarquiaTerritorialSalida(datosTransformados, filas)),
         totalGeneral: totalGeneralFinal ? limpiarFilaSalida(totalGeneralFinal) : null,
         aniosConsultados: aniosConsulta,
         metadata: {

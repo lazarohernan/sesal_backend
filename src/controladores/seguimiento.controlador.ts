@@ -8,7 +8,7 @@ import {
 } from "../utilidades/alcance-regional.util";
 import { logger } from "../utilidades/registro.utilidad";
 
-const ANIO_MIN = 2026;
+const ANIO_MIN = 2025;
 const ANIO_MAX = 2099;
 const MES_MIN = 1;
 const MES_MAX = 12;
@@ -91,6 +91,40 @@ export const obtenerDetalleSeguimientoRegionControlador = async (
       });
     }
     logger.error("Error al obtener detalle de seguimiento", error);
+    throw error;
+  }
+};
+
+export const obtenerMatrizSeguimientoRegionControlador = async (
+  request: FastifyRequest<{ Params: { regionId: string }; Querystring: { anio?: string } }>,
+  reply: FastifyReply
+) => {
+  const anio = sanitizarEntero(request.query?.anio, ANIO_MIN, ANIO_MAX);
+  const regionId = sanitizarEntero(request.params?.regionId, REGION_MIN, REGION_MAX);
+
+  if (anio === null || regionId === null) {
+    return reply.status(400).send({
+      codigo: "PARAMETRO_INVALIDO",
+      mensaje: "Debe indicar región y año válidos para consultar la matriz de seguimiento."
+    });
+  }
+
+  try {
+    resolverRegionesPermitidas(request.usuarioActual, regionId);
+    const matriz = await seguimientoServicio.obtenerMatrizAnualRegion(anio, regionId);
+    return reply.send({
+      datos: matriz,
+      periodo: { anio },
+      generadoEn: new Date().toISOString()
+    });
+  } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message
+      });
+    }
+    logger.error("Error al obtener matriz de seguimiento", error);
     throw error;
   }
 };

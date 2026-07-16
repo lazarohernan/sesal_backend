@@ -10,7 +10,7 @@ import { AlcanceRegionalError, obtenerRegionesPermitidasUsuario } from "../utili
 import { logger } from "../utilidades/registro.utilidad";
 
 export const catalogoEgresosControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {
@@ -30,13 +30,26 @@ export const valoresDimensionEgresosControlador = async (
     const { dimensionId } = request.params as { dimensionId: string };
     const busqueda = (request.query as any).busqueda as string | undefined;
     const limite = (request.query as any).limite ? Number((request.query as any).limite) : undefined;
+    const query = request.query as Record<string, unknown>;
+    const lista = (valor: unknown) => String(valor ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const capitulos = lista(query.capitulos)
+      .map(Number)
+      .filter((valor) => Number.isInteger(valor) && valor > 0);
+    const grupos = lista(query.grupos).filter((valor) => /^\d+:\d+$/.test(valor));
+    const categorias = lista(query.categorias)
+      .map((valor) => valor.toUpperCase())
+      .filter((valor) => /^[A-Z][0-9]{2}$/.test(valor));
     const regionesPermitidas = obtenerRegionesPermitidasUsuario(request.usuarioActual);
 
     const valores = await obtenerValoresDimensionEgresos(
       dimensionId ?? "",
       busqueda,
       limite,
-      regionesPermitidas
+      regionesPermitidas,
+      { capitulos, grupos, categorias }
     );
 
     return reply.send({ valores });
@@ -53,7 +66,7 @@ export const valoresDimensionEgresosControlador = async (
 };
 
 export const aniosEgresosControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
   try {

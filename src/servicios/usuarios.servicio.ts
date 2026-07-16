@@ -6,13 +6,14 @@ import { hashPassword } from "../utilidades/auth.util";
 
 const TABLA_USUARIOS = "app_usuarios";
 const TABLA_SESIONES = "app_sesiones";
+type RolUsuarioGestion = "central" | "regional";
 
 export interface UsuarioGestionado {
   id: number;
   nombre: string;
   username: string;
   email: string;
-  rol: string;
+  rol: RolUsuarioGestion;
   activo: boolean;
   estado: "activo" | "inactivo";
   regiones: string[];
@@ -42,6 +43,7 @@ export interface CrearUsuarioRegionalInput {
   nombre: string;
   username: string;
   email: string;
+  rol?: RolUsuarioGestion;
   passwordTemporal?: string;
   regiones: string[];
   establecimientos?: string[];
@@ -58,6 +60,7 @@ export interface ActualizarUsuarioRegionalInput {
   nombre: string;
   username: string;
   email: string;
+  rol?: RolUsuarioGestion;
   estado: "activo" | "inactivo";
   regiones: string[];
   establecimientos?: string[];
@@ -138,12 +141,14 @@ const normalizarFecha = (valor: Date | string | null) => {
   return Number.isNaN(fecha.getTime()) ? "" : fecha.toISOString();
 };
 
+const normalizarRol = (rol?: string): RolUsuarioGestion => (rol === "central" ? "central" : "regional");
+
 const mapearUsuario = (row: UsuarioGestionRow): UsuarioGestionado => ({
   id: row.id,
   nombre: row.nombre_mostrar,
   username: row.username,
   email: row.email ?? "",
-  rol: row.rol,
+  rol: normalizarRol(row.rol),
   activo: Boolean(row.activo),
   estado: Boolean(row.activo) ? "activo" : "inactivo",
   regiones: normalizarRegiones(row.regiones_json),
@@ -237,8 +242,13 @@ export class UsuariosServicio {
     const nombre = payload.nombre.trim();
     const username = payload.username.trim().toLowerCase();
     const email = payload.email.trim().toLowerCase();
-    const regiones = [...new Set(payload.regiones.map((region) => region.trim()).filter(Boolean))];
-    const establecimientos = [...new Set((payload.establecimientos ?? []).map((e) => e.trim()).filter(Boolean))];
+    const rol = normalizarRol(payload.rol);
+    const regiones = rol === "regional"
+      ? [...new Set(payload.regiones.map((region) => region.trim()).filter(Boolean))]
+      : [];
+    const establecimientos = rol === "regional"
+      ? [...new Set((payload.establecimientos ?? []).map((e) => e.trim()).filter(Boolean))]
+      : [];
     const puedeVerSeguimiento = Boolean(payload.puedeVerSeguimiento);
     const passwordTemporal = payload.passwordTemporal?.trim() || generarPasswordTemporal();
 
@@ -246,7 +256,7 @@ export class UsuariosServicio {
       throw new Error("Los datos basicos del usuario son obligatorios.");
     }
 
-    if (regiones.length === 0) {
+    if (rol === "regional" && regiones.length === 0) {
       throw new Error("Debe asignar al menos una region.");
     }
 
@@ -262,13 +272,14 @@ export class UsuariosServicio {
         `
           INSERT INTO ${TABLA_USUARIOS}
             (username, email, password_hash, nombre_mostrar, rol, regiones_json, establecimientos_json, puede_ver_seguimiento, activo, requiere_cambio_password)
-          VALUES (?, ?, ?, ?, 'regional', ?, ?, ?, 1, 1)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
         `,
         [
           username,
           email,
           passwordHash,
           nombre,
+          rol,
           JSON.stringify(regiones),
           establecimientos.length > 0 ? JSON.stringify(establecimientos) : null,
           puedeVerSeguimiento ? 1 : 0
@@ -304,8 +315,13 @@ export class UsuariosServicio {
     const nombre = payload.nombre.trim();
     const username = payload.username.trim().toLowerCase();
     const email = payload.email.trim().toLowerCase();
-    const regiones = [...new Set(payload.regiones.map((region) => region.trim()).filter(Boolean))];
-    const establecimientos = [...new Set((payload.establecimientos ?? []).map((e) => e.trim()).filter(Boolean))];
+    const rol = normalizarRol(payload.rol);
+    const regiones = rol === "regional"
+      ? [...new Set(payload.regiones.map((region) => region.trim()).filter(Boolean))]
+      : [];
+    const establecimientos = rol === "regional"
+      ? [...new Set((payload.establecimientos ?? []).map((e) => e.trim()).filter(Boolean))]
+      : [];
     const puedeVerSeguimiento = Boolean(payload.puedeVerSeguimiento);
     const activo = payload.estado === "activo" ? 1 : 0;
 
@@ -317,7 +333,7 @@ export class UsuariosServicio {
       throw new Error("Los datos basicos del usuario son obligatorios.");
     }
 
-    if (regiones.length === 0) {
+    if (rol === "regional" && regiones.length === 0) {
       throw new Error("Debe asignar al menos una region.");
     }
 
@@ -328,10 +344,6 @@ export class UsuariosServicio {
       throw new Error("El usuario seleccionado no existe.");
     }
 
-    if (usuarioActual.rol !== "regional") {
-      throw new Error("Solo se pueden editar usuarios regionales desde esta seccion.");
-    }
-
     try {
       const [resultado] = await pool.query<ResultSetHeader>(
         `
@@ -340,6 +352,7 @@ export class UsuariosServicio {
             username = ?,
             email = ?,
             nombre_mostrar = ?,
+            rol = ?,
             regiones_json = ?,
             establecimientos_json = ?,
             puede_ver_seguimiento = ?,
@@ -351,6 +364,7 @@ export class UsuariosServicio {
           username,
           email,
           nombre,
+          rol,
           JSON.stringify(regiones),
           establecimientos.length > 0 ? JSON.stringify(establecimientos) : null,
           puedeVerSeguimiento ? 1 : 0,
@@ -361,6 +375,13 @@ export class UsuariosServicio {
 
       if (resultado.affectedRows === 0) {
         throw new Error("No fue posible actualizar el usuario.");
+      }
+
+      if (!activo || usuarioActual.rol !== rol) {
+        await pool.query(
+          `UPDATE ${TABLA_SESIONES} SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL`,
+          [id]
+        );
       }
 
       const usuarioActualizado = await this.obtenerUsuarioPorId(id);
@@ -471,10 +492,6 @@ export class UsuariosServicio {
     const usuarioActual = await this.obtenerUsuarioPorId(userId);
     if (!usuarioActual) {
       throw new Error("El usuario seleccionado no existe.");
-    }
-
-    if (usuarioActual.rol !== "regional") {
-      throw new Error("Solo se pueden administrar usuarios regionales desde esta seccion.");
     }
 
     const passwordHash = await hashPassword(passwordTemporal);

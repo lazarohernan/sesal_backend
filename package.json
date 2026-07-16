@@ -4,10 +4,14 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node --project tsconfig.json src/server.ts",
+    "typecheck": "tsc --noEmit",
     "build": "rm -rf dist && tsc",
     "start": "node dist/server.js",
+    "start:prod": "NODE_ENV=production node dist/server.js",
+    "audit": "npm audit --omit=dev --audit-level=high",
     "refresh:tablero-resumen": "node scripts/refrescar-tablero-resumen.js",
     "db:indexes:egresos": "node scripts/crear-indices-egresos.js",
+    "db:import-cie": "node herramientas/importar-catalogo-cie.js",
     "db:optimize:at2-legacy": "node scripts/optimizar-at2-legacy.js",
     "explain:queries": "node scripts/explain-queries.js",
     "sync:bas-bdr-us": "node scripts/sincronizar-bas-bdr-us.js"
@@ -21,12 +25,16 @@
     "@fastify/cors": "^11.2.0",
     "@fastify/helmet": "^13.0.2",
     "dotenv": "^17.2.2",
-    "fastify": "^5.8.2",
+    "fastify": "^5.8.5",
     "mysql2": "^3.15.1"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "xlsx": "^0.18.5"
+  },
+  "engines": {
+    "node": ">=20 <25"
   }
 }
