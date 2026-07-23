@@ -39,6 +39,14 @@ export const esEdadAdolescente = (edad: unknown, tipoEdad: unknown): boolean => 
 export const expresionCodigoCieNormalizadoSql = (alias: string) =>
   `REPLACE(REPLACE(UPPER(TRIM(${alias}.C_CIE)), '.', ''), '*', '')`;
 
+/** Diagnósticos O80, O81, O82 y O84 asociados a un egreso con parto. */
+export const construirCondicionPartoCieSql = (alias: string) => {
+  const codigo = expresionCodigoCieNormalizadoSql(alias);
+  return `(${CIE_PARTO_CATEGORIAS
+    .map((categoria) => `${codigo} LIKE '${categoria}%'`)
+    .join(" OR ")})`;
+};
+
 /** Diagnóstico de aborto según reporte municipal (generar_reporte.py). */
 export const construirCondicionAbortoCieSql = (alias: string) => {
   const codigo = expresionCodigoCieNormalizadoSql(alias);

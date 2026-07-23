@@ -2,7 +2,7 @@ import type { RowDataPacket } from "mysql2";
 
 import { obtenerPoolActual } from "../base_datos/pool";
 import { cache, CACHE_TTL } from "../utilidades/cache.utilidad";
-import { CIE_PARTO_CATEGORIAS } from "./egresos-cie.util";
+import { construirCondicionPartoCieSql } from "./egresos-cie.util";
 
 export interface EgresosDepartamentoDato {
   departamentoId: number;
@@ -82,7 +82,6 @@ export interface EgresosIndicadoresTablero {
 const TABLA_GENERAL = "EHO_BDT_EGR_GENERAL";
 const TABLA_DIAGNOSTICOS = "EHO_BDT_EGR_DIAGNOSTICOS";
 const TABLA_OPERACIONES = "EHO_BDT_EGR_OPERACIONES";
-const TABLA_PARTOS = "EHO_BDT_EGR_PARTOS";
 const TABLA_US = "BAS_BDR_US";
 const TABLA_DEPARTAMENTOS = "BAS_BDR_DEPARTAMENTOS";
 const TABLA_NIVELES_US = "BAS_BDR_NIVELES_US";
@@ -168,10 +167,6 @@ const construirFiltroTablero = (
 
 const construirCacheKeyTablero = (params: EgresosIndicadoresTableroParams) =>
   `egresos-tablero:indicadores-v3:${params.regionIds?.length ? [...params.regionIds].sort((a, b) => a - b).join(",") : "all"}:${params.departamentoId ?? "hn"}:${params.anio ?? "all"}`;
-
-const construirCondicionCategoriasParto = (alias: string) => {
-  return `(${CIE_PARTO_CATEGORIAS.map((categoria) => `${alias}.C_CIE LIKE '${categoria}%'`).join(" OR ")})`;
-};
 
 export const obtenerAniosEgresosTablero = async (): Promise<number[]> => {
   return cache.getOrSet(
@@ -365,17 +360,41 @@ export const obtenerIndicadoresTableroEgresos = async (
           SELECT COUNT(*) AS totalDiagnosticos
             FROM ${TABLA_DIAGNOSTICOS} d
             ${filtroDiagnosticos.clause}
+            ${filtroDiagnosticos.clause ? "AND" : "WHERE"} EXISTS (
+              SELECT 1
+              FROM ${TABLA_GENERAL} g_rel
+              WHERE g_rel.C_US = d.C_US
+                AND g_rel.N_ANIO = d.N_ANIO
+                AND g_rel.N_MES = d.N_MES
+                AND g_rel.N_PAGINA = d.N_PAGINA
+            )
         ) diagnosticos
         CROSS JOIN (
           SELECT COUNT(*) AS totalOperaciones
             FROM ${TABLA_OPERACIONES} o
             ${filtroOperaciones.clause}
+            ${filtroOperaciones.clause ? "AND" : "WHERE"} EXISTS (
+              SELECT 1
+              FROM ${TABLA_GENERAL} g_rel
+              WHERE g_rel.C_US = o.C_US
+                AND g_rel.N_ANIO = o.N_ANIO
+                AND g_rel.N_MES = o.N_MES
+                AND g_rel.N_PAGINA = o.N_PAGINA
+            )
         ) operaciones
         CROSS JOIN (
           SELECT COUNT(DISTINCT CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA)) AS totalPartos
             FROM ${TABLA_DIAGNOSTICOS} d
             ${filtroPartos.clause}
-            ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionCategoriasParto("d")}
+            ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionPartoCieSql("d")}
+              AND EXISTS (
+                SELECT 1
+                FROM ${TABLA_GENERAL} g_rel
+                WHERE g_rel.C_US = d.C_US
+                  AND g_rel.N_ANIO = d.N_ANIO
+                  AND g_rel.N_MES = d.N_MES
+                  AND g_rel.N_PAGINA = d.N_PAGINA
+              )
         ) partos
         CROSS JOIN (
           SELECT COUNT(*) AS totalPartosAdolescentes
@@ -390,7 +409,7 @@ export const obtenerIndicadoresTableroEgresos = async (
                   AND d_parto.N_ANIO = g.N_ANIO
                   AND d_parto.N_MES = g.N_MES
                   AND d_parto.N_PAGINA = g.N_PAGINA
-                  AND ${construirCondicionCategoriasParto("d_parto")}
+                  AND ${construirCondicionPartoCieSql("d_parto")}
               )
         ) adolescentes
       `;
@@ -455,6 +474,14 @@ export const obtenerIndicadoresTableroEgresos = async (
             COUNT(*) AS totalOperaciones
           FROM ${TABLA_OPERACIONES} o
           ${filtroOperaciones.clause}
+          ${filtroOperaciones.clause ? "AND" : "WHERE"} EXISTS (
+            SELECT 1
+            FROM ${TABLA_GENERAL} g_rel
+            WHERE g_rel.C_US = o.C_US
+              AND g_rel.N_ANIO = o.N_ANIO
+              AND g_rel.N_MES = o.N_MES
+              AND g_rel.N_PAGINA = o.N_PAGINA
+          )
           GROUP BY o.N_MES
         ) operaciones
           ON operaciones.mes = meses.mes
@@ -464,7 +491,15 @@ export const obtenerIndicadoresTableroEgresos = async (
             COUNT(DISTINCT CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA)) AS totalPartos
           FROM ${TABLA_DIAGNOSTICOS} d
           ${filtroPartos.clause}
-          ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionCategoriasParto("d")}
+            ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionPartoCieSql("d")}
+            AND EXISTS (
+              SELECT 1
+              FROM ${TABLA_GENERAL} g_rel
+              WHERE g_rel.C_US = d.C_US
+                AND g_rel.N_ANIO = d.N_ANIO
+                AND g_rel.N_MES = d.N_MES
+                AND g_rel.N_PAGINA = d.N_PAGINA
+            )
           GROUP BY d.N_MES
         ) partos
           ON partos.mes = meses.mes
@@ -487,6 +522,14 @@ export const obtenerIndicadoresTableroEgresos = async (
             COUNT(*) AS totalOperaciones
           FROM ${TABLA_OPERACIONES} o
           ${filtroOperaciones.clause}
+          ${filtroOperaciones.clause ? "AND" : "WHERE"} EXISTS (
+            SELECT 1
+            FROM ${TABLA_GENERAL} g_rel
+            WHERE g_rel.C_US = o.C_US
+              AND g_rel.N_ANIO = o.N_ANIO
+              AND g_rel.N_MES = o.N_MES
+              AND g_rel.N_PAGINA = o.N_PAGINA
+          )
           GROUP BY o.C_US
         ) operaciones
           ON operaciones.C_US = g.C_US
@@ -601,6 +644,14 @@ export const obtenerIndicadoresDepartamentoEgresos = async (
             INNER JOIN ${TABLA_US} us
               ON us.C_US = base.C_US
             WHERE ${clause}
+              AND EXISTS (
+                SELECT 1
+                FROM ${TABLA_GENERAL} general_rel
+                WHERE general_rel.C_US = base.C_US
+                  AND general_rel.N_ANIO = base.N_ANIO
+                  AND general_rel.N_MES = base.N_MES
+                  AND general_rel.N_PAGINA = base.N_PAGINA
+              )
           ) AS totalDiagnosticos,
           (
             SELECT COUNT(*)
@@ -608,6 +659,14 @@ export const obtenerIndicadoresDepartamentoEgresos = async (
             INNER JOIN ${TABLA_US} us
               ON us.C_US = base.C_US
             WHERE ${clause}
+              AND EXISTS (
+                SELECT 1
+                FROM ${TABLA_GENERAL} general_rel
+                WHERE general_rel.C_US = base.C_US
+                  AND general_rel.N_ANIO = base.N_ANIO
+                  AND general_rel.N_MES = base.N_MES
+                  AND general_rel.N_PAGINA = base.N_PAGINA
+              )
           ) AS totalOperaciones,
           (
             SELECT COUNT(DISTINCT CONCAT_WS(':', base.C_US, base.N_ANIO, base.N_MES, base.N_PAGINA))
@@ -615,7 +674,15 @@ export const obtenerIndicadoresDepartamentoEgresos = async (
             INNER JOIN ${TABLA_US} us
               ON us.C_US = base.C_US
             WHERE ${clause}
-              AND ${construirCondicionCategoriasParto("base")}
+              AND ${construirCondicionPartoCieSql("base")}
+              AND EXISTS (
+                SELECT 1
+                FROM ${TABLA_GENERAL} general_rel
+                WHERE general_rel.C_US = base.C_US
+                  AND general_rel.N_ANIO = base.N_ANIO
+                  AND general_rel.N_MES = base.N_MES
+                  AND general_rel.N_PAGINA = base.N_PAGINA
+              )
           ) AS totalPartos,
           (
             SELECT COUNT(*)
@@ -632,7 +699,7 @@ export const obtenerIndicadoresDepartamentoEgresos = async (
                   AND d_parto.N_ANIO = base.N_ANIO
                   AND d_parto.N_MES = base.N_MES
                   AND d_parto.N_PAGINA = base.N_PAGINA
-                  AND ${construirCondicionCategoriasParto("d_parto")}
+                  AND ${construirCondicionPartoCieSql("d_parto")}
               )
           ) AS totalPartosAdolescentes,
           (

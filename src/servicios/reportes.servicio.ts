@@ -7,14 +7,11 @@ import {
 } from "./at2-detalle-fuente.servicio";
 import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
 import { seguimientoServicio, type EstadoSeguimiento } from "./seguimiento.servicio";
+import { CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS } from "../utilidades/at2-reglas.util";
+import { construirCatalogoAt2NuevoSql } from "../utilidades/at2-catalogo.util";
 
-const CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS = "19";
 const TOTAL_ATENCIONES_EXPRESSION =
   "COALESCE(det.Q_AT_ENFERMERA_AUX, 0) + COALESCE(det.Q_AT_ENFERMERA_PRO, 0) + COALESCE(det.Q_AT_MEDICO_GEN, 0) + COALESCE(det.Q_AT_MEDICO_ESP, 0)";
-
-const obtenerMaxConceptoAt2PorAnio = (anio: number) => (anio >= 2026 ? 92 : 52);
-
-
 
 export interface IndicadoresMunicipalesParams {
   anio?: number;
@@ -47,6 +44,7 @@ export interface ResumenMaestroAt2Resultado {
   anio: number;
   mesInicio: number;
   mesFin: number;
+  versionFormulario: "1" | "2";
   filas: ResumenMaestroAt2Fila[];
 }
 
@@ -163,7 +161,42 @@ export const obtenerResumenMaestroAt2 = async (params: {
   const pool = obtenerPoolActual();
   const fuenteDetalle = construirFuenteDetalleAt2([anio]);
   const filtroRegion = condicionRegiones(regionIds);
-  const maxConcepto = obtenerMaxConceptoAt2PorAnio(anio);
+  const [versionesRows] = await pool.query<RowDataPacket[]>(
+    `SELECT DISTINCT det.V_FORMULARIO
+       FROM ${fuenteDetalle}
+       INNER JOIN BAS_BDR_US us
+         ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci
+      WHERE det.N_ANIO = ?
+        AND det.N_MES BETWEEN ? AND ?
+        ${filtroRegion.sql}`,
+    [anio, mesInicio, mesFin, ...filtroRegion.params]
+  );
+  const versionesPresentes = new Set(
+    versionesRows.map((fila) => String(fila.V_FORMULARIO ?? ""))
+  );
+  if (versionesPresentes.has("3") && versionesPresentes.has("4")) {
+    throw new Error(
+      "El período seleccionado contiene formularios AT2-R históricos y nuevos; deben reportarse por versión para no mezclar conceptos distintos."
+    );
+  }
+  const versionFormulario: "1" | "2" =
+    versionesPresentes.has("3") && !versionesPresentes.has("4") ? "1" : "2";
+  const maxConcepto = versionFormulario === "1" ? 53 : 92;
+  const catalogoConceptos = versionFormulario === "2"
+    ? `
+        SELECT numero, descripcion
+        FROM (${construirCatalogoAt2NuevoSql()}) catalogo_nuevo
+        WHERE numero BETWEEN 1 AND ?
+      `
+    : `
+        SELECT
+          CAST(TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS UNSIGNED) AS numero,
+          MAX(TRIM(D_CONCEPTO)) AS descripcion
+        FROM AT2_BDR_CONCEPTOS_GE
+        WHERE CAST(TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS UNSIGNED) BETWEEN 1 AND ?
+          AND (V_FORMULARIO = '3' OR (V_FORMULARIO IS NULL AND CAST(C_CONCEPTO AS UNSIGNED) = 53))
+        GROUP BY CAST(TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS UNSIGNED)
+      `;
 
   const [rows] = await pool.query<RowDataPacket[]>(
     `
@@ -174,29 +207,7 @@ export const obtenerResumenMaestroAt2 = async (params: {
         COALESCE(agg.enfermera_profesional, 0) AS enfermera_profesional,
         COALESCE(agg.medico_general, 0) AS medico_general,
         COALESCE(agg.medico_especialista, 0) AS medico_especialista
-      FROM (
-        SELECT
-          numero,
-          MIN(descripcion) AS descripcion
-        FROM (
-          SELECT
-            CAST(TRIM(LEADING '0' FROM TRIM(codigo)) AS UNSIGNED) AS numero,
-            TRIM(descripcion) AS descripcion
-          FROM cat_concepto_ordenado
-          WHERE CAST(TRIM(LEADING '0' FROM TRIM(codigo)) AS UNSIGNED) BETWEEN 1 AND ?
-
-          UNION ALL
-
-          SELECT
-            CAST(TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS UNSIGNED) AS numero,
-            MAX(TRIM(D_CONCEPTO)) AS descripcion
-          FROM AT2_BDR_CONCEPTOS_GE
-          WHERE CAST(TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS UNSIGNED) BETWEEN 1 AND ?
-          GROUP BY CAST(TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS UNSIGNED)
-        ) catalogo
-        WHERE numero BETWEEN 1 AND ?
-        GROUP BY numero
-      ) conceptos
+      FROM (${catalogoConceptos}) conceptos
       LEFT JOIN (
         SELECT
           CAST(TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) AS UNSIGNED) AS numero,
@@ -215,7 +226,7 @@ export const obtenerResumenMaestroAt2 = async (params: {
       ) agg ON agg.numero = conceptos.numero
       ORDER BY conceptos.numero
     `,
-    [maxConcepto, maxConcepto, maxConcepto, anio, mesInicio, mesFin, maxConcepto, ...filtroRegion.params]
+    [maxConcepto, anio, mesInicio, mesFin, maxConcepto, ...filtroRegion.params]
   );
 
   const filasConsultadas = rows.map((row) => {
@@ -252,6 +263,7 @@ export const obtenerResumenMaestroAt2 = async (params: {
     anio,
     mesInicio,
     mesFin,
+    versionFormulario,
     filas
   };
   }, CACHE_TTL.REPORTES_OFICIALES);
@@ -260,13 +272,17 @@ export const obtenerResumenMaestroAt2 = async (params: {
 export const obtenerControlEnviosAt2 = async (params: {
   anio: number;
   regionIds?: number[] | null;
-}): Promise<ControlEnviosAt2Resultado> => {
+}, opciones: {
+  sincronizar?: boolean;
+} = {}): Promise<ControlEnviosAt2Resultado> => {
   const { anio, regionIds } = params;
   const cacheKey = `reportes:control-envios-at2:${anio}:${construirRegionKey(regionIds)}`;
 
-  return cache.getOrSet(cacheKey, async () => {
-  await seguimientoServicio.asegurarTabla();
-  await seguimientoServicio.sincronizarEnviosDesdeDetalleAnual(anio);
+  const consultar = async () => {
+  if (opciones.sincronizar !== false) {
+    await seguimientoServicio.asegurarTabla();
+    await seguimientoServicio.sincronizarEnviosDesdeDetalleAnual(anio);
+  }
   const pool = obtenerPoolActual();
   const filtroRegion = regionIds?.length
     ? {
@@ -393,7 +409,13 @@ export const obtenerControlEnviosAt2 = async (params: {
       };
     })
   };
-  }, CACHE_TTL.REPORTES_OFICIALES);
+  };
+
+  if (opciones.sincronizar === false) {
+    return consultar();
+  }
+
+  return cache.getOrSet(cacheKey, consultar, CACHE_TTL.REPORTES_OFICIALES);
 };
 
 export const obtenerEstadisticasCache = () => {

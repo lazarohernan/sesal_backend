@@ -1,39 +1,25 @@
 import type { FastifyRequest, FastifyReply } from "fastify";
-import type { RowDataPacket, OkPacket } from "mysql2";
+import type { RowDataPacket } from "mysql2";
 import { obtenerPoolActual } from "../base_datos/pool";
 import { AlcanceRegionalError, obtenerRegionesPermitidasUsuario, resolverRegionParaRegistro } from "../utilidades/alcance-regional.util";
 import { logger } from "../utilidades/registro.utilidad";
+import { cache } from "../utilidades/cache.utilidad";
 import { seguimientoServicio } from "../servicios/seguimiento.servicio";
 import { obtenerTablaDetalleAt2 } from "../servicios/at2-detalle-fuente.servicio";
+import {
+  sincronizarTotalPacientesAtendidos,
+  validarConsistenciaAt2r,
+  type RegistroAt2Normalizado
+} from "../utilidades/at2-reglas.util";
 
 // -- Versión activa del formulario AT2R --
 
 export type VersionFormularioAt2 = '1' | '2';
 
-const CONCEPTO_MAX_V1 = 52;
+const CONCEPTO_MAX_V1 = 53;
 const CONCEPTO_MAX_V2 = 92;
 const V_FORMULARIO_V1 = '3';
 const V_FORMULARIO_V2 = '4';
-const CLAVE_CONFIG_VERSION = 'AT2_VERSION_FORMULARIO';
-
-export const obtenerVersionFormularioAt2 = async (): Promise<VersionFormularioAt2> => {
-  const pool = obtenerPoolActual();
-  const [rows] = await pool.query<RowDataPacket[]>(
-    'SELECT VALOR FROM BAS_BDP_SISTEMA WHERE VARIABLE = ? LIMIT 1',
-    [CLAVE_CONFIG_VERSION]
-  );
-  const valor = rows[0]?.VALOR;
-  return valor === '2' ? '2' : '1';
-};
-
-export const guardarVersionFormularioAt2 = async (version: VersionFormularioAt2): Promise<void> => {
-  const pool = obtenerPoolActual();
-  await pool.query<OkPacket>(
-    `INSERT INTO BAS_BDP_SISTEMA (VARIABLE, VALOR) VALUES (?, ?)
-     ON DUPLICATE KEY UPDATE VALOR = VALUES(VALOR)`,
-    [CLAVE_CONFIG_VERSION, version]
-  );
-};
 
 const vFormularioPorVersion = (v: VersionFormularioAt2) =>
   v === '2' ? V_FORMULARIO_V2 : V_FORMULARIO_V1;
@@ -49,6 +35,13 @@ const vFormularioPorAnio = (anio: number) =>
 
 const versionFormularioPorAnio = (anio: number): VersionFormularioAt2 =>
   anio >= 2026 ? '2' : '1';
+
+const invalidarCachesAt2 = (anio: number) => {
+  cache.deleteByPrefix("pivot:query:");
+  cache.deleteByPrefix(`pivot:meses:${anio}`);
+  cache.deleteByPrefix("reportes:");
+  cache.deleteByPrefix("tablero:");
+};
 
 // -- Validacion y sanitizacion --
 
@@ -92,64 +85,6 @@ const sanitizarValorNumerico = (valor: unknown): number => {
   const num = Number(valor);
   if (!Number.isFinite(num) || num < 0) return 0;
   return Math.min(Math.floor(num), VALOR_MAX);
-};
-
-type RegistroAt2Normalizado = {
-  concepto: number;
-  enfermeraAux: number;
-  enfermeraPro: number;
-  medicoGen: number;
-  medicoEsp: number;
-};
-
-const CAMPOS_RECURSO_AT2 = [
-  { key: "enfermeraAux", label: "Enf. Aux." },
-  { key: "enfermeraPro", label: "Enf. Prof." },
-  { key: "medicoGen", label: "Med. Gral." },
-  { key: "medicoEsp", label: "Med. Esp." }
-] as const;
-
-const formatearEntero = (valor: number) => valor.toLocaleString("es-HN");
-
-const validarConsistenciaAt2r = (
-  registros: RegistroAt2Normalizado[],
-  conceptoMaximo: number
-): string | null => {
-  if (conceptoMaximo < 23) return null;
-
-  const porConcepto = new Map<number, RegistroAt2Normalizado>();
-  registros.forEach((registro) => porConcepto.set(registro.concepto, registro));
-
-  for (let concepto = 1; concepto <= 23; concepto += 1) {
-    if (!porConcepto.has(concepto)) {
-      return `Debe enviar los conceptos 1 al 23 para validar los totales AT2R. Falta el concepto ${concepto}.`;
-    }
-  }
-
-  const valor = (concepto: number, campo: keyof RegistroAt2Normalizado) =>
-    Number(porConcepto.get(concepto)?.[campo] ?? 0);
-
-  for (const campo of CAMPOS_RECURSO_AT2) {
-    const sumaEdad = Array.from({ length: 18 }, (_, index) => index + 1)
-      .reduce((total, concepto) => total + valor(concepto, campo.key), 0);
-    const concepto19 = valor(19, campo.key);
-    const mujeresHombres = valor(20, campo.key) + valor(21, campo.key);
-    const espontaneasReferidas = valor(22, campo.key) + valor(23, campo.key);
-
-    if (sumaEdad !== concepto19) {
-      return `${campo.label}: la suma de conceptos 1 al 18 (${formatearEntero(sumaEdad)}) debe ser igual al concepto 19 (${formatearEntero(concepto19)}).`;
-    }
-
-    if (mujeresHombres !== concepto19) {
-      return `${campo.label}: conceptos 20 + 21 (${formatearEntero(mujeresHombres)}) deben ser igual al concepto 19 (${formatearEntero(concepto19)}).`;
-    }
-
-    if (espontaneasReferidas !== concepto19) {
-      return `${campo.label}: conceptos 22 + 23 (${formatearEntero(espontaneasReferidas)}) deben ser igual al concepto 19 (${formatearEntero(concepto19)}).`;
-    }
-  }
-
-  return null;
 };
 
 const sanitizarCodigoRups = (valor: unknown): string | null => {
@@ -243,16 +178,9 @@ export const guardarRegistroControlador = async (
       });
     }
 
-    const versionActiva = versionFormularioPorAnio(anioVal);
-    const conceptoMaxActual = conceptoMaxPorAnio(anioVal);
-    const vFormularioActual = vFormularioPorAnio(anioVal);
-
-    if (!Array.isArray(registros) || registros.length === 0 || registros.length > conceptoMaxActual) {
-      return reply.status(400).send({
-        codigo: "PARAMETRO_INVALIDO",
-        mensaje: `El campo 'registros' debe ser un array de 1 a ${conceptoMaxActual} elementos (versión ${versionActiva} para ${anioVal})`
-      });
-    }
+    let versionActiva = versionFormularioPorAnio(anioVal);
+    let conceptoMaxActual = conceptoMaxPorAnio(anioVal);
+    let vFormularioActual = vFormularioPorAnio(anioVal);
 
     const codigoRups =
       sanitizarCodigoRups(establecimientoCodigo) ??
@@ -287,6 +215,44 @@ export const guardarRegistroControlador = async (
     const cServicio = esHospital
       ? (servicioVal === 'emergencia' ? '2' : '1')
       : '1';
+
+    const pool = obtenerPoolActual();
+    const tablaDetalle = obtenerTablaDetalleAt2(anioVal);
+    if (anioVal >= 2026 && identificadorRegistro) {
+      await seguimientoServicio.asegurarTabla();
+    }
+
+    const [versionesExistentes] = await pool.query<RowDataPacket[]>(
+      `SELECT V_FORMULARIO, COUNT(*) AS total
+       FROM ${tablaDetalle}
+       WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?
+       GROUP BY V_FORMULARIO`,
+      [identificadorRegistro, anioVal, mesVal, cServicio]
+    );
+    const totalExistente = versionesExistentes.reduce(
+      (total, fila) => total + Number(fila.total ?? 0),
+      0
+    );
+
+    // Una edición conserva el esquema real del bloque. Esto evita reinterpretar
+    // registros 2026 legados (V_FORMULARIO=3) como conceptos del formulario nuevo.
+    if (
+      esEdicion &&
+      totalExistente > 0 &&
+      !versionesExistentes.some((fila) => String(fila.V_FORMULARIO) === V_FORMULARIO_V2) &&
+      versionesExistentes.some((fila) => String(fila.V_FORMULARIO) === V_FORMULARIO_V1)
+    ) {
+      versionActiva = '1';
+      conceptoMaxActual = CONCEPTO_MAX_V1;
+      vFormularioActual = V_FORMULARIO_V1;
+    }
+
+    if (!Array.isArray(registros) || registros.length === 0 || registros.length > conceptoMaxActual) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: `El campo 'registros' debe ser un array de 1 a ${conceptoMaxActual} elementos (versión ${versionActiva} para ${anioVal})`
+      });
+    }
 
     // Sanitizar cada registro
     const conceptosVistos = new Set<number>();
@@ -323,6 +289,7 @@ export const guardarRegistroControlador = async (
       });
     }
 
+    sincronizarTotalPacientesAtendidos(registrosNormalizados);
     const errorConsistencia = validarConsistenciaAt2r(registrosNormalizados, conceptoMaxActual);
     if (errorConsistencia) {
       return reply.status(400).send({
@@ -343,7 +310,7 @@ export const guardarRegistroControlador = async (
           cServicio,             // C_SERVICIO
           String(registro.concepto), // C_CONCEPTO
           null,                  // V_US
-          vFormularioActual,     // V_FORMULARIO ('3'=v1/52, '4'=v2/92)
+          vFormularioActual,     // V_FORMULARIO ('3'=v1/53, '4'=v2/92)
           registro.enfermeraAux,
           registro.enfermeraPro,
           registro.medicoGen,
@@ -358,20 +325,6 @@ export const guardarRegistroControlador = async (
         mensaje: "No se encontraron valores numéricos para guardar"
       });
     }
-
-    const pool = obtenerPoolActual();
-    const tablaDetalle = obtenerTablaDetalleAt2(anioVal);
-    if (anioVal >= 2026 && identificadorRegistro) {
-      await seguimientoServicio.asegurarTabla();
-    }
-
-    const [registrosExistentes] = await pool.query<RowDataPacket[]>(
-      `SELECT COUNT(*) AS total
-       FROM ${tablaDetalle}
-       WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ? AND V_FORMULARIO = ?`,
-      [identificadorRegistro, anioVal, mesVal, cServicio, vFormularioActual]
-    );
-    const totalExistente = Number(registrosExistentes[0]?.total ?? 0);
 
     if (totalExistente > 0 && !esEdicion) {
       return reply.status(409).send({
@@ -402,8 +355,8 @@ export const guardarRegistroControlador = async (
 
       if (esEdicion) {
         await conn.query(
-          `DELETE FROM ${tablaDetalle} WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ? AND V_FORMULARIO = ?`,
-          [identificadorRegistro, anioVal, mesVal, cServicio, vFormularioActual]
+          `DELETE FROM ${tablaDetalle} WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?`,
+          [identificadorRegistro, anioVal, mesVal, cServicio]
         );
       }
 
@@ -430,6 +383,7 @@ export const guardarRegistroControlador = async (
       }
 
       await conn.commit();
+      invalidarCachesAt2(anioVal);
 
       const info = resultado as { affectedRows: number };
       logger.info(`Registro hospitalario ${esEdicion ? "actualizado" : "guardado"}: identificador=${identificadorRegistro}, region=${regionVal}, ${mesVal}/${anioVal}, ${filas.length} conceptos, ${info.affectedRows} filas afectadas`);
@@ -462,6 +416,155 @@ export const guardarRegistroControlador = async (
       });
     }
     logger.error("Error al guardar registro hospitalario", error);
+    throw error;
+  }
+};
+
+// -- DELETE /api/registro-hospitalario --
+
+export const eliminarRegistroControlador = async (
+  request: FastifyRequest,
+  reply: FastifyReply
+) => {
+  try {
+    const {
+      region,
+      anio,
+      mes,
+      establecimiento,
+      establecimientoCodigo,
+      rups,
+      servicio
+    } = (request.body ?? {}) as Record<string, unknown>;
+
+    const regionFueEnviada = region !== undefined && region !== null && region !== "";
+    const regionSolicitada = regionFueEnviada
+      ? sanitizarEntero(region, REGION_MIN, REGION_MAX)
+      : null;
+    const regionVal = resolverRegionParaRegistro(request.usuarioActual, regionSolicitada);
+    const anioVal = sanitizarEntero(anio, ANIO_MIN, ANIO_MAX);
+    const mesVal = sanitizarEntero(mes, MES_MIN, MES_MAX);
+
+    if (
+      (regionFueEnviada && regionSolicitada === null) ||
+      regionVal === null ||
+      anioVal === null ||
+      mesVal === null
+    ) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "Se requieren región, año y mes válidos para eliminar el registro."
+      });
+    }
+
+    const codigoRups =
+      sanitizarCodigoRups(establecimientoCodigo) ??
+      sanitizarCodigoRups(establecimiento) ??
+      sanitizarCodigoRups(rups);
+    const identificadorRegistro = anioVal >= 2026 ? codigoRups : String(regionVal);
+
+    if (!identificadorRegistro) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "Para 2026 en adelante debe indicar un establecimiento válido mediante su código RUPS."
+      });
+    }
+
+    if (anioVal >= 2026) {
+      await validarRupsPerteneceARegion(identificadorRegistro, regionVal);
+    }
+
+    const esHospital = await esCodigoHospital(identificadorRegistro);
+    const servicioVal = sanitizarServicio(servicio);
+    if (esHospital && !servicioVal) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "Este establecimiento es un hospital. Debe indicar el servicio que desea eliminar."
+      });
+    }
+
+    const cServicio = esHospital
+      ? (servicioVal === "emergencia" ? "2" : "1")
+      : "1";
+    const servicioSeguimiento = esHospital
+      ? (servicioVal === "emergencia" ? "emergencia" : "consulta_externa")
+      : "general";
+    const tablaDetalle = obtenerTablaDetalleAt2(anioVal);
+    const pool = obtenerPoolActual();
+
+    if (anioVal >= 2026) {
+      await seguimientoServicio.asegurarTabla();
+    }
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [resultado] = await conn.query(
+        `DELETE FROM ${tablaDetalle}
+         WHERE C_US = ?
+           AND N_ANIO = ?
+           AND N_MES = ?
+           AND C_SERVICIO = ?`,
+        [identificadorRegistro, anioVal, mesVal, cServicio]
+      );
+      const filasEliminadas = Number(
+        (resultado as { affectedRows?: number }).affectedRows ?? 0
+      );
+
+      if (filasEliminadas === 0) {
+        await conn.rollback();
+        return reply.status(404).send({
+          codigo: "REGISTRO_NO_EXISTE",
+          mensaje: "No existe un registro guardado para eliminar."
+        });
+      }
+
+      if (anioVal >= 2026) {
+        await seguimientoServicio.registrarEliminacion(
+          {
+            anio: anioVal,
+            mes: mesVal,
+            regionCodigo: regionVal,
+            establecimientoRups: identificadorRegistro,
+            servicio: servicioSeguimiento
+          },
+          conn
+        );
+      }
+
+      await conn.commit();
+      invalidarCachesAt2(anioVal);
+
+      logger.info(
+        `Registro hospitalario eliminado: identificador=${identificadorRegistro}, region=${regionVal}, ${mesVal}/${anioVal}, servicio=${cServicio}, filas=${filasEliminadas}`
+      );
+
+      return reply.status(200).send({
+        mensaje: "Registro eliminado correctamente",
+        datos: {
+          region: regionVal,
+          establecimiento: identificadorRegistro,
+          anio: anioVal,
+          mes: mesVal,
+          servicio: cServicio,
+          filasEliminadas
+        },
+        generadoEn: new Date().toISOString()
+      });
+    } catch (error) {
+      await conn.rollback();
+      throw error;
+    } finally {
+      conn.release();
+    }
+  } catch (error) {
+    if (error instanceof AlcanceRegionalError) {
+      return reply.status(error.statusCode).send({
+        codigo: error.codigo,
+        mensaje: error.message
+      });
+    }
+    logger.error("Error al eliminar registro hospitalario", error);
     throw error;
   }
 };
@@ -518,12 +621,26 @@ export const obtenerRegistroControlador = async (
       ? (servicioValGet === 'emergencia' ? '2' : '1')
       : '1';
 
-    const versionActivaGet = versionFormularioPorAnio(anioVal);
-    const vFormularioGet = vFormularioPorAnio(anioVal);
-
     const pool = obtenerPoolActual();
     const tablaDetalle = obtenerTablaDetalleAt2(anioVal);
-    let [rows] = await pool.query<RowDataPacket[]>(
+    const [versiones] = await pool.query<RowDataPacket[]>(
+      `SELECT V_FORMULARIO, COUNT(*) AS total
+       FROM ${tablaDetalle}
+       WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?
+       GROUP BY V_FORMULARIO`,
+      [identificadorRegistro, anioVal, mesVal, cServicioGet]
+    );
+    const tieneVersionNueva = versiones.some(
+      (fila) => String(fila.V_FORMULARIO) === V_FORMULARIO_V2
+    );
+    const tieneVersionHistorica = versiones.some(
+      (fila) => String(fila.V_FORMULARIO) === V_FORMULARIO_V1
+    );
+    const versionActivaGet: VersionFormularioAt2 =
+      tieneVersionNueva ? '2' : tieneVersionHistorica ? '1' : versionFormularioPorAnio(anioVal);
+    const vFormularioGet = vFormularioPorVersion(versionActivaGet);
+
+    const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT
         CAST(C_CONCEPTO AS UNSIGNED) AS concepto,
         Q_AT_ENFERMERA_AUX AS enfermera_aux,
@@ -536,22 +653,6 @@ export const obtenerRegistroControlador = async (
       [identificadorRegistro, anioVal, mesVal, cServicioGet, vFormularioGet]
     );
 
-    if (rows.length === 0 && anioVal >= 2026) {
-      [rows] = await pool.query<RowDataPacket[]>(
-        `SELECT
-          CAST(C_CONCEPTO AS UNSIGNED) AS concepto,
-          SUM(Q_AT_ENFERMERA_AUX) AS enfermera_aux,
-          SUM(Q_AT_ENFERMERA_PRO) AS enfermera_pro,
-          SUM(Q_AT_MEDICO_GEN) AS medico_gen,
-          SUM(Q_AT_MEDICO_ESP) AS medico_esp
-         FROM ${tablaDetalle}
-         WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?
-         GROUP BY CAST(C_CONCEPTO AS UNSIGNED)
-         ORDER BY CAST(C_CONCEPTO AS UNSIGNED)`,
-        [identificadorRegistro, anioVal, mesVal, cServicioGet]
-      );
-    }
-
     return reply.status(200).send({
       datos: rows,
       region: regionVal,
@@ -559,6 +660,7 @@ export const obtenerRegistroControlador = async (
       anio: anioVal,
       mes: mesVal,
       versionFormulario: versionActivaGet,
+      vFormularioBD: vFormularioGet,
       generadoEn: new Date().toISOString()
     });
   } catch (error) {
@@ -580,12 +682,15 @@ export const obtenerVersionFormularioControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    const version = await obtenerVersionFormularioAt2();
+    const anio = new Date().getFullYear();
+    const version = versionFormularioPorAnio(anio);
     return reply.status(200).send({
       versionFormulario: version,
       maxConcepto: conceptoMaxPorVersion(version),
       vFormularioBD: vFormularioPorVersion(version),
-      descripcion: version === '2' ? 'AT2-R-2026 (92 casillas)' : 'AT2-R-2012 (52 casillas)',
+      descripcion: version === '2' ? 'AT2-R-2026 (92 casillas)' : 'AT2-R-2012 (53 casillas)',
+      modoSeleccion: 'por_anio',
+      anio,
       generadoEn: new Date().toISOString()
     });
   } catch (error) {
@@ -597,30 +702,13 @@ export const obtenerVersionFormularioControlador = async (
 // -- PUT /api/registro-hospitalario/version-formulario --
 
 export const actualizarVersionFormularioControlador = async (
-  request: FastifyRequest,
+  _request: FastifyRequest,
   reply: FastifyReply
 ) => {
-  try {
-    const { version } = request.body as { version?: unknown };
-    if (version !== '1' && version !== '2') {
-      return reply.status(400).send({
-        codigo: "PARAMETRO_INVALIDO",
-        mensaje: "El campo 'version' debe ser '1' (52 conceptos) o '2' (92 conceptos)"
-      });
-    }
-    await guardarVersionFormularioAt2(version as VersionFormularioAt2);
-    logger.info(`Versión formulario AT2R actualizada a v${version} por usuario ${request.usuarioActual?.id ?? 'desconocido'}`);
-    return reply.status(200).send({
-      mensaje: `Versión de formulario AT2R actualizada a v${version}`,
-      versionFormulario: version,
-      maxConcepto: conceptoMaxPorVersion(version as VersionFormularioAt2),
-      descripcion: version === '2' ? 'AT2-R-2026 (92 casillas)' : 'AT2-R-2012 (52 casillas)',
-      generadoEn: new Date().toISOString()
-    });
-  } catch (error) {
-    logger.error("Error al actualizar versión formulario AT2R", error);
-    throw error;
-  }
+  return reply.status(409).send({
+    codigo: "VERSION_DEFINIDA_POR_ANIO",
+    mensaje: "La versión del formulario AT2-R se determina por el año del registro y no puede cambiarse manualmente."
+  });
 };
 
 // -- GET /api/registro-hospitalario/estado --
@@ -655,10 +743,10 @@ export const obtenerEstadoRegistrosControlador = async (
 	           FROM ${tablaDetalle} det
 	           INNER JOIN BAS_BDR_US us
              ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci
-           WHERE det.N_ANIO = ? AND det.V_FORMULARIO = ?${condicionRegion}
+           WHERE det.N_ANIO = ?${condicionRegion}
            GROUP BY us.C_REGION, det.N_MES
            ORDER BY us.C_REGION, det.N_MES`,
-          [anioVal, vFormularioEstado, ...(regionesPermitidas ?? [])]
+          [anioVal, ...(regionesPermitidas ?? [])]
         )
       : await pool.query<RowDataPacket[]>(
           `SELECT

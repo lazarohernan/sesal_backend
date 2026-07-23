@@ -6,11 +6,11 @@ import {
   construirFuenteDetalleAt2,
   construirFuenteDetalleAt2TodosLosAnios
 } from "./at2-detalle-fuente.servicio";
+import { CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS } from "../utilidades/at2-reglas.util";
 
 const TABLA_GLOBAL_ANIO_RESUMEN = "tablero_global_anio_resumen";
 const TABLA_REGION_ANIO_RESUMEN = "tablero_region_anio_resumen";
 const TABLA_REGION_DEPARTAMENTO_RESUMEN = "tablero_region_departamento_resumen";
-const CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS = "19";
 const TOTAL_ATENCIONES_EXPRESSION =
   "COALESCE(det.Q_AT_ENFERMERA_AUX, 0) + COALESCE(det.Q_AT_ENFERMERA_PRO, 0) + COALESCE(det.Q_AT_MEDICO_GEN, 0) + COALESCE(det.Q_AT_MEDICO_ESP, 0)";
 

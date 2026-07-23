@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import {
   guardarRegistroControlador,
+  eliminarRegistroControlador,
   obtenerRegistroControlador,
   obtenerEstadoRegistrosControlador,
   obtenerVersionFormularioControlador,
@@ -22,6 +23,7 @@ const registroHospitalarioRutas: FastifyPluginAsync = async (fastify) => {
   fastify.get("/", { preHandler: [requireRegistroReadAccess] }, obtenerRegistroControlador);
   fastify.post("/", { preHandler: [requireRegionalCaptureRole] }, guardarRegistroControlador);
   fastify.put("/", { preHandler: [requireRegionalCaptureRole] }, guardarRegistroControlador);
+  fastify.delete("/", { preHandler: [requireRegionalCaptureRole] }, eliminarRegistroControlador);
 };
 
 export default registroHospitalarioRutas;

@@ -4,6 +4,7 @@ import {
   CIE_PARTO_CATEGORIAS,
   construirCondicionAbortoCieSql,
   construirCondicionEmbarazoCieSql,
+  construirCondicionPartoCieSql,
   construirEtiquetaCie,
   esCodigoCategoriaCie,
   esCodigoCategoriaParto,
@@ -39,5 +40,8 @@ assert.equal(esEdadAdolescente(20, 4), false);
 assert.equal(esEdadAdolescente(11, 3), false);
 
 assert.match(construirCondicionEmbarazoCieSql("cie"), /cie\.B_EMBARAZO = 1/);
+assert.match(construirCondicionPartoCieSql("cie"), /UPPER\(TRIM\(cie\.C_CIE\)\)/);
+assert.match(construirCondicionPartoCieSql("cie"), /O80%/);
+assert.match(construirCondicionPartoCieSql("cie"), /O84%/);
 assert.match(construirCondicionAbortoCieSql("cie"), /O03%/);
 assert.match(construirCondicionAbortoCieSql("cie"), /%ABORTO%/);

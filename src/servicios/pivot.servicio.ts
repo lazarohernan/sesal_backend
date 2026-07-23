@@ -5,6 +5,10 @@ import { obtenerPoolActual } from "../base_datos/pool";
 import { cache, CACHE_TTL, CACHE_KEYS } from "../utilidades/cache.utilidad";
 import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
 import {
+  CONCEPTOS_AT2_FORMULARIO_NUEVO,
+  construirCaseConceptoAt2NuevoSql
+} from "../utilidades/at2-catalogo.util";
+import {
   construirFuenteDetalleAt2,
   obtenerAniosDetalleAt2Disponibles,
   obtenerTablaDetalleAt2
@@ -124,7 +128,7 @@ const JOIN_DEFINITIONS: Record<JoinKey, string> = {
   cat_concepto_ordenado:
     "LEFT JOIN cat_concepto_ordenado cat_concepto_ordenado ON (TRIM(cat_concepto_ordenado.codigo) COLLATE utf8mb4_unicode_ci = TRIM(det.C_CONCEPTO) COLLATE utf8mb4_unicode_ci OR TRIM(LEADING '0' FROM TRIM(cat_concepto_ordenado.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci)",
   concepto_ge_codigo:
-    "LEFT JOIN (SELECT TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS codigo_normalizado, MAX(D_CONCEPTO) AS D_CONCEPTO FROM AT2_BDR_CONCEPTOS_GE GROUP BY TRIM(LEADING '0' FROM TRIM(C_CONCEPTO))) concepto_ge_codigo ON concepto_ge_codigo.codigo_normalizado COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci",
+    "LEFT JOIN (SELECT TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS codigo_normalizado, MAX(D_CONCEPTO) AS D_CONCEPTO FROM AT2_BDR_CONCEPTOS_GE WHERE V_FORMULARIO IS NULL GROUP BY TRIM(LEADING '0' FROM TRIM(C_CONCEPTO))) concepto_ge_codigo ON concepto_ge_codigo.codigo_normalizado COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci",
   cat_establecimiento:
     "LEFT JOIN cat_establecimientos cat_establecimiento ON cat_establecimiento.codigo COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci",
   cat_region:
@@ -177,6 +181,23 @@ const REGION_DESCRIPCION_SQL = `
     ${REGION_DESCRIPCION_FALLBACK_SQL},
     CAST(COALESCE(us.C_REGION, det.C_US) AS CHAR)
   )
+`;
+
+const CONCEPTO_NUEVO_DESCRIPCION_SQL = construirCaseConceptoAt2NuevoSql("det.C_CONCEPTO");
+const CONCEPTO_DESCRIPCION_SQL = `
+  CASE
+    WHEN det.V_FORMULARIO = '4' THEN COALESCE(
+      ${CONCEPTO_NUEVO_DESCRIPCION_SQL},
+      CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)')
+    )
+    ELSE COALESCE(
+      concepto_ge.D_CONCEPTO,
+      concepto_ge_codigo.D_CONCEPTO,
+      cat_concepto.descripcion,
+      cat_concepto_ordenado.descripcion,
+      CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)')
+    )
+  END
 `;
 
 const NIVEL_OPERATIVO_CODIGO_SQL = `
@@ -274,14 +295,11 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Concepto",
     alias: "concepto",
     type: "string",
-    select:
-      "COALESCE(cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
-    groupBy:
-      "COALESCE(cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
+    select: CONCEPTO_DESCRIPCION_SQL,
+    groupBy: CONCEPTO_DESCRIPCION_SQL,
     valueExpr: "det.C_CONCEPTO",
-    joins: ["cat_concepto", "concepto_ge", "concepto_ge_codigo"],
-    orderBy:
-      "COALESCE(cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
+    joins: ["cat_concepto", "cat_concepto_ordenado", "concepto_ge", "concepto_ge_codigo"],
+    orderBy: CONCEPTO_DESCRIPCION_SQL,
     catalog: {
       table: "cat_conceptos",
       valueColumn: "codigo",
@@ -296,14 +314,11 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Concepto Ordenado",
     alias: "concepto_ordenado",
     type: "string",
-    // Fallback a cat_conceptos y conceptos_ge cuando cat_concepto_ordenado está incompleto.
-    select:
-      "COALESCE(cat_concepto_ordenado.descripcion, cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)'))",
-    groupBy:
-      "COALESCE(cat_concepto_ordenado.descripcion, cat_concepto.descripcion, concepto_ge.D_CONCEPTO, concepto_ge_codigo.D_CONCEPTO, CONCAT('Concepto ', det.C_CONCEPTO, ' (sin catálogo)')), cat_concepto_ordenado.codigo, cat_concepto.codigo, det.C_CONCEPTO",
+    select: CONCEPTO_DESCRIPCION_SQL,
+    groupBy: `${CONCEPTO_DESCRIPCION_SQL}, det.C_CONCEPTO`,
     valueExpr: "det.C_CONCEPTO",
     joins: ["cat_concepto_ordenado", "cat_concepto", "concepto_ge", "concepto_ge_codigo"],
-    orderBy: "LPAD(COALESCE(cat_concepto_ordenado.codigo, cat_concepto.codigo, det.C_CONCEPTO), 2, '0')",
+    orderBy: "LPAD(det.C_CONCEPTO, 10, '0')",
     catalog: {
       table: "cat_concepto_ordenado",
       valueColumn: "codigo",
@@ -769,6 +784,21 @@ export const obtenerValoresDimension = async (
   return cache.getOrSet(
     cacheKey,
     async () => {
+      if (dimensionId === "CONCEPTO" || dimensionId === "CONCEPTO_ORDENADO") {
+        const texto = busqueda?.trim().toLowerCase() ?? "";
+        return CONCEPTOS_AT2_FORMULARIO_NUEVO
+          .filter((concepto) =>
+            !texto ||
+            concepto.descripcion.toLowerCase().includes(texto) ||
+            String(concepto.numero).includes(texto)
+          )
+          .slice(0, limiteFinal)
+          .map((concepto) => ({
+            valor: String(concepto.numero),
+            etiqueta: concepto.descripcion
+          }));
+      }
+
       const pool = tomarPool();
 
       if (dimensionId === "NIVEL_OPERATIVO") {
@@ -1379,19 +1409,31 @@ const registrarMetadataConcepto = (
   metadata: Map<string, ConceptoOrdenadoMetadata>,
   codigo: unknown,
   label: string,
-  sortKey: string
+  sortKey: string,
+  versionFormulario = "*"
 ) => {
   const original = normalizarCodigoConcepto(codigo);
   const sinCeros = normalizarCodigoConceptoSinCeros(codigo);
+  const clave = (valor: string) => `${versionFormulario}:${valor}`;
 
-  if (original && !metadata.has(original)) {
-    metadata.set(original, { label, sortKey });
+  if (original && !metadata.has(clave(original))) {
+    metadata.set(clave(original), { label, sortKey });
   }
 
-  if (sinCeros && !metadata.has(sinCeros)) {
-    metadata.set(sinCeros, { label, sortKey });
+  if (sinCeros && !metadata.has(clave(sinCeros))) {
+    metadata.set(clave(sinCeros), { label, sortKey });
   }
 };
+
+const buscarMetadataConcepto = (
+  metadata: Map<string, ConceptoOrdenadoMetadata>,
+  codigo: string,
+  versionFormulario: string
+) =>
+  metadata.get(`${versionFormulario}:${codigo}`) ??
+  metadata.get(`${versionFormulario}:${normalizarCodigoConceptoSinCeros(codigo)}`) ??
+  metadata.get(`*:${codigo}`) ??
+  metadata.get(`*:${normalizarCodigoConceptoSinCeros(codigo)}`);
 
 const obtenerMetadataConceptoOrdenado = async (): Promise<Map<string, ConceptoOrdenadoMetadata>> => {
   return cache.getOrSet(
@@ -1399,6 +1441,32 @@ const obtenerMetadataConceptoOrdenado = async (): Promise<Map<string, ConceptoOr
     async () => {
       const pool = tomarPool();
       const metadata = new Map<string, ConceptoOrdenadoMetadata>();
+
+      CONCEPTOS_AT2_FORMULARIO_NUEVO.forEach((concepto) => {
+        registrarMetadataConcepto(
+          metadata,
+          concepto.numero,
+          concepto.descripcion,
+          construirSortKeyConcepto(concepto.numero),
+          "4"
+        );
+      });
+
+      const [conceptosGe] = await pool.query<RowDataPacket[]>(
+        "SELECT C_CONCEPTO, D_CONCEPTO, V_FORMULARIO FROM AT2_BDR_CONCEPTOS_GE ORDER BY V_FORMULARIO, CAST(C_CONCEPTO AS UNSIGNED)"
+      );
+      conceptosGe.forEach((row) => {
+        const codigo = normalizarCodigoConcepto(row.C_CONCEPTO);
+        const descripcion = String(row.D_CONCEPTO ?? "").trim();
+        if (!codigo || !descripcion) return;
+        registrarMetadataConcepto(
+          metadata,
+          codigo,
+          descripcion,
+          construirSortKeyConcepto(codigo),
+          String(row.V_FORMULARIO ?? "3")
+        );
+      });
 
       const [ordenados] = await pool.query<RowDataPacket[]>(
         "SELECT codigo, descripcion FROM cat_concepto_ordenado"
@@ -1421,21 +1489,6 @@ const obtenerMetadataConceptoOrdenado = async (): Promise<Map<string, ConceptoOr
       conceptos.forEach((row) => {
         const codigo = normalizarCodigoConcepto(row.codigo);
         const descripcion = String(row.descripcion ?? "").trim();
-        if (!codigo || !descripcion) return;
-        registrarMetadataConcepto(
-          metadata,
-          codigo,
-          descripcion,
-          construirSortKeyConcepto(codigo)
-        );
-      });
-
-      const [conceptosGe] = await pool.query<RowDataPacket[]>(
-        "SELECT C_CONCEPTO, D_CONCEPTO FROM AT2_BDR_CONCEPTOS_GE"
-      );
-      conceptosGe.forEach((row) => {
-        const codigo = normalizarCodigoConcepto(row.C_CONCEPTO);
-        const descripcion = String(row.D_CONCEPTO ?? "").trim();
         if (!codigo || !descripcion) return;
         registrarMetadataConcepto(
           metadata,
@@ -1737,9 +1790,12 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
     );
   }
 
-  const selectParts = ["det.C_CONCEPTO AS concepto_codigo"];
-  const groupByParts = ["det.C_CONCEPTO"];
-  const orderByParts = ["LPAD(det.C_CONCEPTO, 10, '0')"];
+  const selectParts = [
+    "det.C_CONCEPTO AS concepto_codigo",
+    "det.V_FORMULARIO AS version_formulario"
+  ];
+  const groupByParts = ["det.C_CONCEPTO", "det.V_FORMULARIO"];
+  const orderByParts = ["LPAD(det.C_CONCEPTO, 10, '0')", "det.V_FORMULARIO"];
 
   if (incluyeAnio) {
     selectParts.push("det.N_ANIO AS anio");
@@ -1780,9 +1836,12 @@ LIMIT ${limit}`;
 
   const datosNormalizados = rows.map((row) => {
     const codigoConcepto = normalizarCodigoConcepto(row.concepto_codigo);
-    const metadata =
-      metadataConceptos.get(codigoConcepto) ??
-      metadataConceptos.get(normalizarCodigoConceptoSinCeros(codigoConcepto));
+    const versionFormulario = String(row.version_formulario ?? "");
+    const metadata = buscarMetadataConcepto(
+      metadataConceptos,
+      codigoConcepto,
+      versionFormulario
+    );
     const objeto: Record<string, unknown> = {
       CONCEPTO_ORDENADO: metadata?.label ?? construirEtiquetaConceptoFallback(codigoConcepto),
       total_optimized: Number(row.total_optimized ?? 0),
@@ -1867,100 +1926,6 @@ LIMIT ${limit}`;
   };
 }
 
-async function ejecutarConsultaAgregada(payload: PivotQueryPayload): Promise<PivotQueryResult | null> {
-  // Solo usar agregación si:
-  // 1. Rows = ['CONCEPTO']
-  // 2. Values = [{ field: 'TOTAL', aggregation: 'SUM' }]
-  // 3. Filters solo contiene ANIO (NO región, NO otros filtros)
-  const filas = payload.rows ?? [];
-  const valores = payload.values ?? [];
-  const filtros = payload.filters ?? [];
-  
-  // Verificar que NO haya filtros de región/departamento
-  const tieneFiltroRegion = filtros.some(f => 
-    f.field === 'REGION' || 
-    f.field === 'DEPARTAMENTO' || 
-    f.field === 'MUNICIPIO' ||
-    f.field === 'US'
-  );
-  
-  const usaAgregacion = 
-    filas.length === 1 && filas[0] === 'CONCEPTO' &&
-    valores.length === 1 && valores[0].field === 'TOTAL' && valores[0].aggregation === 'SUM' &&
-    !tieneFiltroRegion && // NO debe tener filtros geográficos
-    filtros.every(f => f.field === 'ANIO' || f.field === 'CONCEPTO'); // Solo ANIO o CONCEPTO
-  
-  if (!usaAgregacion) return null;
-  
-  // Construir consulta optimizada
-  const anios = filtros.find(f => f.field === 'ANIO')?.values ?? [];
-  const limite = payload.limit ?? 20;
-  
-  let whereClause = 'WHERE C_REGION IS NULL';
-  const params: any[] = [];
-  
-  if (anios.length > 0) {
-    whereClause += ` AND N_ANIO IN (${anios.map(() => '?').join(',')})`;
-    params.push(...anios);
-  }
-  
-  const query = `
-    SELECT 
-      COALESCE(cat.descripcion, ord.descripcion, ge.D_CONCEPTO, CONCAT('Concepto ', agg.C_CONCEPTO, ' (sin catálogo)')) AS CONCEPTO,
-      SUM(agg.TOTAL_ATENCIONES) AS \`Total de Atenciones\`
-    FROM AGG_INDICADORES_CONCEPTO agg
-    LEFT JOIN cat_conceptos cat ON (
-      TRIM(cat.codigo) COLLATE utf8mb4_unicode_ci = TRIM(agg.C_CONCEPTO) COLLATE utf8mb4_unicode_ci
-      OR TRIM(LEADING '0' FROM TRIM(cat.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(agg.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci
-    )
-    LEFT JOIN cat_concepto_ordenado ord ON (
-      TRIM(ord.codigo) COLLATE utf8mb4_unicode_ci = TRIM(agg.C_CONCEPTO) COLLATE utf8mb4_unicode_ci
-      OR TRIM(LEADING '0' FROM TRIM(ord.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(agg.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci
-    )
-    LEFT JOIN (
-      SELECT
-        TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS codigo_normalizado,
-        MAX(D_CONCEPTO) AS D_CONCEPTO
-      FROM AT2_BDR_CONCEPTOS_GE
-      GROUP BY TRIM(LEADING '0' FROM TRIM(C_CONCEPTO))
-    ) ge ON ge.codigo_normalizado COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(agg.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci
-    ${whereClause.replace('C_REGION', 'agg.C_REGION').replace('N_ANIO', 'agg.N_ANIO')}
-    GROUP BY COALESCE(cat.descripcion, ord.descripcion, ge.D_CONCEPTO, CONCAT('Concepto ', agg.C_CONCEPTO, ' (sin catálogo)')), agg.C_CONCEPTO
-    ORDER BY SUM(agg.TOTAL_ATENCIONES) DESC
-    LIMIT ?
-  `;
-  
-  params.push(limite);
-  
-  const pool = tomarPool();
-  let datos: any[] = [];
-  try {
-    const [rows] = await pool.query<RowDataPacket[]>(query, params);
-    datos = rows as any[];
-  } catch (error: any) {
-    // En algunos entornos la tabla AGG_* no existe; degradar al flujo normal sin romper la API.
-    if (error?.code === "ER_NO_SUCH_TABLE") {
-      return null;
-    }
-    throw error;
-  }
-  
-  // Calcular total general
-  const totalGeneral = datos.reduce((sum: number, row: any) => sum + (row['Total de Atenciones'] || 0), 0);
-  
-  return {
-    datos: limpiarFilasSalida(datos),
-    metadata: {
-      dimensionesSeleccionadas: ['CONCEPTO'],
-      dimensionesFilas: ['CONCEPTO'],
-      dimensionesColumnas: [],
-      medidasSeleccionadas: ['TOTAL']
-    },
-    aniosConsultados: anios as number[],
-    totalGeneral: { 'Total de Atenciones': totalGeneral }
-  };
-}
-
 // Genera una clave de caché única para una consulta pivot
 const generarClaveCachePivot = (payload: PivotQueryPayload): string => {
   // Usar years si está definido, sino year, sino 'all'
@@ -2002,11 +1967,6 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
       const resultadoConceptoOrdenado = await ejecutarConsultaConceptoOrdenadoOptimizada(payload);
       if (resultadoConceptoOrdenado) {
         return resultadoConceptoOrdenado;
-      }
-
-      const resultadoAgregado = await ejecutarConsultaAgregada(payload);
-      if (resultadoAgregado) {
-        return resultadoAgregado;
       }
 
       const filas = payload.rows ?? [];

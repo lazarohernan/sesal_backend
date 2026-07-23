@@ -2,9 +2,9 @@ import type { RowDataPacket } from "mysql2";
 import { obtenerPoolActual } from "../base_datos/pool";
 import { cache, CACHE_TTL } from "../utilidades/cache.utilidad";
 import {
-  CIE_PARTO_CATEGORIAS,
   construirCondicionAbortoCieSql,
   construirCondicionEmbarazoCieSql,
+  construirCondicionPartoCieSql,
   esCodigoCategoriaCie,
   normalizarCodigoCie,
 } from "./egresos-cie.util";
@@ -35,7 +35,6 @@ type JoinKey =
   | "OP_RAW"
   | "OP_PRINCIPAL"
   | "PT"
-  | "PT_RAW"
   | "CAUSAS";
 interface QueryJoinContext {
   anios?: number[];
@@ -214,6 +213,10 @@ const DIAGNOSTICO_DETALLE_ETIQUETA_SQL = `
   END
 `;
 const EGRESO_CLAVE_SQL = "CONCAT(g.C_US, '|', g.N_ANIO, '|', g.N_MES, '|', g.N_PAGINA)";
+const DIAGNOSTICO_LINEA_CLAVE_SQL =
+  `CONCAT(${EGRESO_CLAVE_SQL}, '|', dx_raw.C_CORRELATIVO)`;
+const OPERACION_LINEA_CLAVE_SQL =
+  `CONCAT(${EGRESO_CLAVE_SQL}, '|', op_raw.C_CORRELATIVO)`;
 const CIE_CATEGORIA_CODIGO_SQL =
   "COALESCE(NULLIF(TRIM(cie_dx_raw.C_CIE_CATEGORIA), ''), 'Sin categoría')";
 const CIE_CAPITULO_CODIGO_SQL =
@@ -246,6 +249,14 @@ const DIMENSIONES_LINEA_DIAGNOSTICO = new Set([
   "CIE_CATEGORIA",
   "CIE_CAPITULO",
   "CIE_GRUPO",
+  "CODIGO_ORDEN_AFECCION",
+]);
+const DIMENSIONES_LINEA_OPERACION = new Set([
+  "CODIGO_ORDEN_OPERACION",
+]);
+const DIMENSIONES_LINEA_MULTIVALUADA = new Set([
+  ...DIMENSIONES_LINEA_DIAGNOSTICO,
+  ...DIMENSIONES_LINEA_OPERACION,
 ]);
 const GE_ASI_SQL = `
   CASE
@@ -274,11 +285,6 @@ const normalizarEnteros = (values?: Array<number | string> | null) =>
 
 const normalizarCodigoDiagnostico = normalizarCodigoCie;
 
-const construirCondicionCategoriasParto = (alias: string) => {
-  const codigoNormalizado = `REPLACE(REPLACE(UPPER(TRIM(${alias}.C_CIE)), '.', ''), '*', '')`;
-  return `(${CIE_PARTO_CATEGORIAS.map((categoria) => `${codigoNormalizado} LIKE '${categoria}%'`).join(" OR ")})`;
-};
-
 /** Misma lógica que el mapa de egresos (egresos-tablero.servicio). */
 const construirCondicionPartoAdolescenteEnLinea = () =>
   `g.C_PAC_EDAD_TIPO = 4
@@ -290,7 +296,7 @@ const construirCondicionPartoAdolescenteEnLinea = () =>
         AND d_parto.N_ANIO = g.N_ANIO
         AND d_parto.N_MES = g.N_MES
         AND d_parto.N_PAGINA = g.N_PAGINA
-        AND ${construirCondicionCategoriasParto("d_parto")}
+        AND ${construirCondicionPartoCieSql("d_parto")}
     )`;
 
 const EXPRESION_PARTOS_ADOLESCENTES = `SUM(CASE WHEN ${construirCondicionPartoAdolescenteEnLinea()} THEN 1 ELSE 0 END)`;
@@ -584,7 +590,7 @@ const JOIN_DEFINITIONS: Record<JoinKey, { sql: (context: QueryJoinContext) => st
   PT: {
     sql: (context) => {
       const { joinRegion, whereClause } = construirWhereSubqueryPorPeriodo("pt_src", context);
-      const wherePartos = agregarCondicionWhere(whereClause, construirCondicionCategoriasParto("pt_src"));
+      const wherePartos = agregarCondicionWhere(whereClause, construirCondicionPartoCieSql("pt_src"));
       return `
       LEFT JOIN (
         SELECT
@@ -604,16 +610,6 @@ const JOIN_DEFINITIONS: Record<JoinKey, { sql: (context: QueryJoinContext) => st
        AND pt.N_PAGINA = g.N_PAGINA
     `;
     },
-  },
-  PT_RAW: {
-    sql: () => `
-      LEFT JOIN EHO_BDT_EGR_DIAGNOSTICOS pt_raw
-        ON pt_raw.C_US = g.C_US
-       AND pt_raw.N_ANIO = g.N_ANIO
-       AND pt_raw.N_MES = g.N_MES
-       AND pt_raw.N_PAGINA = g.N_PAGINA
-       AND ${construirCondicionCategoriasParto("pt_raw")}
-    `,
   },
   CAUSAS: {
     sql: () => `
@@ -902,7 +898,8 @@ const MEDIDAS: MeasureDef[] = [
     id: "ESTANCIA_PROMEDIO",
     label: "Estancia Promedio",
     description: "Promedio de días de estancia",
-    expression: "ROUND(AVG(COALESCE(g.Q_DIAS_ESTANCIA, 0)), 2)",
+    expression:
+      "ROUND(SUM(COALESCE(g.Q_DIAS_ESTANCIA, 0)) / NULLIF(COUNT(*), 0), 2)",
     defaultAggregation: "AVG",
   },
   {
@@ -932,7 +929,7 @@ const MEDIDAS: MeasureDef[] = [
   {
     id: "TOTAL_PARTOS",
     label: "Total de Partos",
-    description: "Partos asociados a los egresos",
+    description: "Egresos únicos con al menos un diagnóstico O80, O81, O82 u O84",
     expression: "SUM(COALESCE(pt.total_partos, 0))",
     defaultAggregation: "SUM",
     joins: ["PT"],
@@ -988,10 +985,6 @@ const optimizarMedidasConsulta = (measures: MeasureDef[]): QueryMeasureDef[] => 
   if (measure.id === "TOTAL_OPERACIONES") {
     return [{ ...measure, expression: "COUNT(op_raw.C_CORRELATIVO)", joins: ["OP_RAW"] }];
   }
-  if (measure.id === "TOTAL_PARTOS") {
-    return [{ ...measure, expression: "COUNT(pt_raw.C_CORRELATIVO)", joins: ["PT_RAW"] }];
-  }
-
   return [...measures];
 };
 
@@ -1000,8 +993,15 @@ const usaDesglosePorDiagnosticoLinea = (payload: EgresosPivotPayload) =>
     DIMENSIONES_LINEA_DIAGNOSTICO.has(dimensionId)
   );
 
-/** @deprecated Usar usaDesglosePorDiagnosticoLinea */
-const usaDesgloseDiagnosticoEgreso = usaDesglosePorDiagnosticoLinea;
+const usaDesglosePorOperacionLinea = (payload: EgresosPivotPayload) =>
+  [...(payload.rows ?? []), ...(payload.columns ?? [])].some((dimensionId) =>
+    DIMENSIONES_LINEA_OPERACION.has(dimensionId)
+  );
+
+const usaDesglosePorLineaMultivaluada = (payload: EgresosPivotPayload) =>
+  [...(payload.rows ?? []), ...(payload.columns ?? [])].some((dimensionId) =>
+    DIMENSIONES_LINEA_MULTIVALUADA.has(dimensionId)
+  );
 
 const resolverDimensionConsulta = (
   dimension: DimensionDef,
@@ -1020,6 +1020,13 @@ const resolverDimensionConsulta = (
     };
   }
 
+  if (["CIE_CATEGORIA", "CIE_CAPITULO", "CIE_GRUPO"].includes(dimension.id)) {
+    return {
+      ...dimension,
+      filterJoins: dimension.joins,
+    };
+  }
+
   return dimension;
 };
 
@@ -1027,7 +1034,10 @@ const ajustarMedidasParaConsulta = (
   measures: QueryMeasureDef[],
   payload: EgresosPivotPayload
 ): QueryMeasureDef[] => {
-  if (!usaDesglosePorDiagnosticoLinea(payload)) {
+  const desglosaDiagnosticos = usaDesglosePorDiagnosticoLinea(payload);
+  const desglosaOperaciones = usaDesglosePorOperacionLinea(payload);
+
+  if (!desglosaDiagnosticos && !desglosaOperaciones) {
     return measures;
   }
 
@@ -1039,11 +1049,30 @@ const ajustarMedidasParaConsulta = (
       };
     }
 
-    if (measure.id === "TOTAL_DIAGNOSTICOS") {
+    if (measure.id === "TOTAL_DIAGNOSTICOS" && (desglosaDiagnosticos || desglosaOperaciones)) {
       return {
         ...measure,
-        expression: "COUNT(dx_raw.C_CORRELATIVO)",
+        expression: `COUNT(DISTINCT ${DIAGNOSTICO_LINEA_CLAVE_SQL})`,
         joins: ["DX_RAW"],
+      };
+    }
+
+    if (measure.id === "TOTAL_OPERACIONES" && (desglosaDiagnosticos || desglosaOperaciones)) {
+      return {
+        ...measure,
+        expression: `COUNT(DISTINCT ${OPERACION_LINEA_CLAVE_SQL})`,
+        joins: ["OP_RAW"],
+      };
+    }
+
+    if (measure.id === "EGRESOS_CON_OPERACION" && (desglosaDiagnosticos || desglosaOperaciones)) {
+      return {
+        ...measure,
+        expression: `COUNT(DISTINCT CASE
+          WHEN op_raw.C_CORRELATIVO IS NOT NULL THEN ${EGRESO_CLAVE_SQL}
+          ELSE NULL
+        END)`,
+        joins: ["OP_RAW"],
       };
     }
 
@@ -1109,6 +1138,14 @@ const derivarTotalGeneralDesdeDatos = (
 const esMedidaAcumulable = (measure: MeasureDef) =>
   measure.defaultAggregation === "SUM" || measure.defaultAggregation === "COUNT";
 
+const construirClaveFilaPivot = (
+  row: Record<string, unknown>,
+  rowDimensions: DimensionDef[]
+) =>
+  rowDimensions.length
+    ? JSON.stringify(rowDimensions.map((dimension) => row[dimension.label] ?? "Sin dato"))
+    : "__total__";
+
 const etiquetaColumnaPivot = (
   row: Record<string, unknown>,
   columnDimensions: DimensionDef[],
@@ -1128,7 +1165,9 @@ const pivotearColumnas = (
   rowDimensions: DimensionDef[],
   columnDimensions: DimensionDef[],
   measures: QueryMeasureDef[],
-  totalGeneral: Record<string, unknown> | null
+  totalGeneral: Record<string, unknown> | null,
+  totalesDirectosPorFila?: Map<string, Record<string, unknown>>,
+  totalesDirectosPorColumna?: Map<string, unknown>
 ) => {
   if (!columnDimensions.length) {
     return { datos, totalGeneral };
@@ -1136,13 +1175,9 @@ const pivotearColumnas = (
 
   const rowsByKey = new Map<string, Record<string, unknown>>();
   const dynamicColumns = new Set<string>();
-  const rowKeyFor = (row: Record<string, unknown>) =>
-    rowDimensions.length
-      ? JSON.stringify(rowDimensions.map((dimension) => row[dimension.label] ?? "Sin dato"))
-      : "__total__";
 
   for (const row of datos) {
-    const rowKey = rowKeyFor(row);
+    const rowKey = construirClaveFilaPivot(row, rowDimensions);
     let target = rowsByKey.get(rowKey);
 
     if (!target) {
@@ -1161,7 +1196,9 @@ const pivotearColumnas = (
       const numericValue = typeof value === "number" ? value : Number(value);
       const current = target[columnLabel];
       target[columnLabel] =
-        Number.isFinite(numericValue) && typeof current === "number"
+        measure.defaultAggregation !== "AVG" &&
+        Number.isFinite(numericValue) &&
+        typeof current === "number"
           ? current + numericValue
           : value;
 
@@ -1172,6 +1209,9 @@ const pivotearColumnas = (
     }
   }
 
+  for (const column of totalesDirectosPorColumna?.keys() ?? []) {
+    dynamicColumns.add(column);
+  }
   const dynamicColumnList = Array.from(dynamicColumns);
   const measureTotalLabels = measures
     .filter(esMedidaAcumulable)
@@ -1194,11 +1234,23 @@ const pivotearColumnas = (
       }
     }
 
+    const totalesDirectos = totalesDirectosPorFila?.get(
+      construirClaveFilaPivot(row, rowDimensions)
+    );
+    if (totalesDirectos) {
+      Object.assign(ordered, totalesDirectos);
+    }
+
     return ordered;
   });
   const totalPivot: Record<string, unknown> = {};
 
   for (const column of dynamicColumnList) {
+    if (totalesDirectosPorColumna?.has(column)) {
+      totalPivot[column] = totalesDirectosPorColumna.get(column);
+      continue;
+    }
+
     const total = datosPivot.reduce((acc, row) => {
       const value = row[column];
       return acc + (typeof value === "number" ? value : Number(value) || 0);
@@ -2661,7 +2713,8 @@ const ejecutarConsultaEgresosSinCache = async (
 }> => {
   const pool = tomarPool();
   const aniosConsultados = obtenerAniosSolicitados(payload);
-  const desglosarDiagnosticoEgreso = usaDesgloseDiagnosticoEgreso(payload);
+  const desglosarDiagnosticoEgreso = usaDesglosePorDiagnosticoLinea(payload);
+  const desglosarLineaMultivaluada = usaDesglosePorLineaMultivaluada(payload);
   const filaDims = (payload.rows ?? [])
     .map(obtenerDimension)
     .filter((dim): dim is DimensionDef => dim !== undefined)
@@ -2688,7 +2741,8 @@ const ejecutarConsultaEgresosSinCache = async (
     .filter((filter) => !(combinarOrdenConDiagnostico && filter.field === "CODIGO_ORDEN_AFECCION"))
     .filter((filter) => !(combinarOrdenConOperacion && filter.field === "CODIGO_ORDEN_OPERACION"))
     .map((filter) => obtenerDimension(filter.field))
-    .filter((dim): dim is DimensionDef => dim !== undefined);
+    .filter((dim): dim is DimensionDef => dim !== undefined)
+    .map((dimension) => resolverDimensionConsulta(dimension, payload));
 
   const fromClause = construirFromDinamico(
     recolectarJoinKeysConsulta({
@@ -2728,20 +2782,119 @@ const ejecutarConsultaEgresosSinCache = async (
     )
   );
   const appliedLimit = Math.min(Math.max(payload.limit ?? 5000, 1), 10000);
+  let totalesDirectosPorFila: Map<string, Record<string, unknown>> | undefined;
+  let totalesDirectosPorColumna: Map<string, unknown> | undefined;
+  const incluyePromedios = medidasSel.some(
+    (measure) => measure.defaultAggregation === "AVG"
+  );
+
+  const requiereTotalesDirectosPorFila =
+    filaDims.length > 0 &&
+    colDims.length > 0 &&
+    (
+      incluyePromedios ||
+      colDims.some((dimension) => DIMENSIONES_LINEA_MULTIVALUADA.has(dimension.id))
+    );
+
+  if (requiereTotalesDirectosPorFila) {
+    const fromClauseTotalesFila = construirFromDinamico(
+      recolectarJoinKeysConsulta({
+        dimensions: filaDims,
+        filterDimensions: filterDims,
+        measures: medidasSel,
+        requiereAlcanceRegional: Boolean(regionIds?.length),
+      }),
+      { anios: aniosConsultados, regionIds }
+    );
+    const sqlTotalesFila = [
+      `SELECT ${[
+        ...filaDims.map((dimension) => `${dimension.column} AS \`${dimension.label}\``),
+        ...medidasSel.map((measure) => `${measure.expression} AS \`${measure.label}\``),
+      ].join(", ")}`,
+      fromClauseTotalesFila,
+      whereClause,
+      ` GROUP BY ${filaDims.map(obtenerGroupByDimension).join(", ")}`,
+      ` LIMIT ${appliedLimit}`,
+    ].join("");
+    const [filasTotales] = await pool.query<RowDataPacket[]>(sqlTotalesFila, whereParams);
+
+    totalesDirectosPorFila = new Map(
+      filasTotales.map((row) => {
+        const normalizada = normalizarMedidas(
+          enriquecerFila(row as Record<string, unknown>, filaDims),
+          medidasSel
+        );
+        return [
+          construirClaveFilaPivot(normalizada, filaDims),
+          Object.fromEntries(
+            medidasSel.map((measure) => [measure.label, normalizada[measure.label]])
+          ),
+        ];
+      })
+    );
+  }
+
+  if (colDims.length > 0 && (filaDims.length > 0 || incluyePromedios)) {
+    const fromClauseTotalesColumna = construirFromDinamico(
+      recolectarJoinKeysConsulta({
+        dimensions: colDims,
+        filterDimensions: filterDims,
+        measures: medidasSel,
+        requiereAlcanceRegional: Boolean(regionIds?.length),
+      }),
+      { anios: aniosConsultados, regionIds }
+    );
+    const sqlTotalesColumna = [
+      `SELECT ${[
+        ...colDims.map((dimension) => `${dimension.column} AS \`${dimension.label}\``),
+        ...medidasSel.map((measure) => `${measure.expression} AS \`${measure.label}\``),
+      ].join(", ")}`,
+      fromClauseTotalesColumna,
+      whereClause,
+      ` GROUP BY ${colDims.map(obtenerGroupByDimension).join(", ")}`,
+      " LIMIT 10000",
+    ].join("");
+    const [columnasTotales] = await pool.query<RowDataPacket[]>(
+      sqlTotalesColumna,
+      whereParams
+    );
+
+    totalesDirectosPorColumna = new Map(
+      columnasTotales.flatMap((row) => {
+        const normalizada = normalizarMedidas(
+          enriquecerFila(row as Record<string, unknown>, colDims),
+          medidasSel
+        );
+        return medidasSel.map((measure) => [
+          etiquetaColumnaPivot(normalizada, colDims, measure, medidasSel.length),
+          normalizada[measure.label],
+        ] as const);
+      })
+    );
+  }
 
   let totalGeneral: Record<string, unknown> | null = null;
   if (payload.includeTotals !== false) {
     const puedeDerivarDesdeResultados =
       allDims.length > 0 &&
+      !desglosarLineaMultivaluada &&
       puedeDerivarTotalesDesdeDatos(medidasSel) &&
       datosPlano.length < appliedLimit;
 
     if (puedeDerivarDesdeResultados) {
       totalGeneral = derivarTotalGeneralDesdeDatos(datosPlano, medidasSel);
     } else {
+      const fromClauseTotal = construirFromDinamico(
+        recolectarJoinKeysConsulta({
+          filterDimensions: filterDims,
+          measures: medidasSel,
+          requiereAlcanceRegional: Boolean(regionIds?.length),
+        }),
+        { anios: aniosConsultados, regionIds }
+      );
       const totalSql = `
         SELECT ${medidasSel.map((measure) => `${measure.expression} AS \`${measure.label}\``).join(", ")}
-        ${fromClause}
+        ${fromClauseTotal}
         ${whereClause}
       `;
       const [totalRows] = await pool.query<RowDataPacket[]>(totalSql, whereParams);
@@ -2751,7 +2904,15 @@ const ejecutarConsultaEgresosSinCache = async (
     }
   }
 
-  const resultadoPivot = pivotearColumnas(datosPlano, filaDims, colDims, medidasSel, totalGeneral);
+  const resultadoPivot = pivotearColumnas(
+    datosPlano,
+    filaDims,
+    colDims,
+    medidasSel,
+    totalGeneral,
+    totalesDirectosPorFila,
+    totalesDirectosPorColumna
+  );
 
   return {
     datos: resultadoPivot.datos,

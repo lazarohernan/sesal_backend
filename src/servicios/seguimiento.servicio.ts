@@ -54,6 +54,8 @@ interface UpsertSeguimientoInput {
   servicio: "general" | "consulta_externa" | "emergencia";
 }
 
+type EliminarSeguimientoInput = UpsertSeguimientoInput;
+
 interface MarcarRevisionInput {
   id: number;
   reviewedByUserId: number;
@@ -291,6 +293,37 @@ export class SeguimientoServicio {
         input.anio,
         input.mes,
         input.regionCodigo,
+        input.establecimientoRups,
+        input.servicio
+      ]
+    );
+    cache.deleteByPrefix("reportes:");
+  }
+
+  async registrarEliminacion(input: EliminarSeguimientoInput, executor?: QueryExecutor) {
+    await this.asegurarTabla(executor);
+    const db = obtenerExecutor(executor);
+
+    await db.query(
+      `
+        UPDATE ${TABLA_SEGUIMIENTO}
+        SET
+          region_codigo = ?,
+          estado = 'no_enviado',
+          fecha_envio = NULL,
+          fecha_revision = NULL,
+          revisado_por_user_id = NULL,
+          revisado_por_nombre = NULL,
+          observaciones = NULL
+        WHERE anio = ?
+          AND mes = ?
+          AND establecimiento_rups = ?
+          AND servicio = ?
+      `,
+      [
+        input.regionCodigo,
+        input.anio,
+        input.mes,
         input.establecimientoRups,
         input.servicio
       ]
