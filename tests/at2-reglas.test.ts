@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   calcularTotalPacientesAtendidos,
+  sincronizarTotalMenores5,
   sincronizarTotalPacientesAtendidos,
   validarConsistenciaAt2r,
   type RegistroAt2Normalizado
@@ -54,3 +55,17 @@ const mujeres = inconsistente.find((registro) => registro.concepto === 20);
 assert.ok(mujeres);
 mujeres.enfermeraAux += 1;
 assert.match(validarConsistenciaAt2r(inconsistente, 92) ?? "", /mujeres \+ hombres/);
+
+// Línea 40 (formulario 2026) = suma de los conceptos 1 a 6.
+const menores5 = [fila(1, 1, 2, 3, 4), fila(3, 1, 0, 0, 0), fila(6, 0, 0, 0, 10), fila(7, 50, 50, 50, 50), fila(40, 999, 999, 999, 999)];
+sincronizarTotalMenores5(menores5, 92);
+assert.deepEqual(menores5.find((registro) => registro.concepto === 40), fila(40, 2, 2, 3, 14));
+
+const menores5SinLinea40 = [fila(2, 5, 0, 0, 0)];
+sincronizarTotalMenores5(menores5SinLinea40, 92);
+assert.deepEqual(menores5SinLinea40.find((registro) => registro.concepto === 40), fila(40, 5, 0, 0, 0));
+
+// Formulario 2012 (53 casillas): la línea 40 es otro concepto y no se toca.
+const formulario2012 = [fila(1, 1, 1, 1, 1), fila(40, 7, 7, 7, 7)];
+sincronizarTotalMenores5(formulario2012, 53);
+assert.deepEqual(formulario2012.find((registro) => registro.concepto === 40), fila(40, 7, 7, 7, 7));

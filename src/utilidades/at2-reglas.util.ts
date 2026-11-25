@@ -3,6 +3,11 @@ export const CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS =
   String(CONCEPTO_TOTAL_PACIENTES_ATENDIDOS);
 export const CONCEPTO_EDAD_INICIO = 1;
 export const CONCEPTO_EDAD_FIN = 18;
+/** Formulario AT2-R 2026 (92 casillas): línea 40 = suma de los conceptos 1 a 6. */
+export const CONCEPTO_TOTAL_MENORES_5 = 40;
+export const CONCEPTO_MENORES_5_INICIO = 1;
+export const CONCEPTO_MENORES_5_FIN = 6;
+export const CONCEPTO_MAX_FORMULARIO_2026 = 92;
 
 export type RegistroAt2Normalizado = {
   concepto: number;
@@ -62,6 +67,35 @@ export const sincronizarTotalPacientesAtendidos = (
     });
   }
 
+  return registros;
+};
+
+/**
+ * En el formulario 2026, la línea 40 («Total de menores de 5 años Atendidos»)
+ * se calcula con la suma de los conceptos 1 a 6. No aplica al formulario 2012.
+ */
+export const sincronizarTotalMenores5 = (
+  registros: RegistroAt2Normalizado[],
+  conceptoMaximo: number
+): RegistroAt2Normalizado[] => {
+  if (conceptoMaximo < CONCEPTO_MAX_FORMULARIO_2026) return registros;
+
+  const total = { enfermeraAux: 0, enfermeraPro: 0, medicoGen: 0, medicoEsp: 0 };
+  for (const registro of registros) {
+    if (registro.concepto < CONCEPTO_MENORES_5_INICIO || registro.concepto > CONCEPTO_MENORES_5_FIN) {
+      continue;
+    }
+    for (const campo of CAMPOS_RECURSO_AT2) {
+      total[campo.key] += registro[campo.key];
+    }
+  }
+
+  const filaExistente = registros.find((registro) => registro.concepto === CONCEPTO_TOTAL_MENORES_5);
+  if (filaExistente) {
+    Object.assign(filaExistente, total);
+  } else {
+    registros.push({ concepto: CONCEPTO_TOTAL_MENORES_5, ...total });
+  }
   return registros;
 };
 

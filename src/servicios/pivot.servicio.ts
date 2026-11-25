@@ -426,7 +426,7 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
   },
   NIVEL_ESTABLECIMIENTO: {
     id: "NIVEL_ESTABLECIMIENTO",
-    label: "Nivel de Establecimiento de Salud",
+    label: "Tipo de ES",
     alias: "nivel_establecimiento",
     type: "string",
     select: NIVEL_ESTABLECIMIENTO_ETIQUETA_SQL,
