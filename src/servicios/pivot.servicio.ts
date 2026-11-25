@@ -1046,11 +1046,11 @@ const obtenerEstablecimientosPorMunicipio = async (
     const esSoloNumeros = /^\d+$/.test(busqueda.trim());
     if (esSoloNumeros) {
       // Búsqueda exacta en código O parcial en nombre
-      condiciones.push("(cat.codigo = ? OR cat.nombre LIKE ?)");
+      condiciones.push("(CAST(us.C_US AS CHAR) = ? OR COALESCE(cat.nombre, us.D_US) LIKE ?)");
       parametros.push(busqueda.trim(), `%${busqueda}%`);
     } else {
       // Búsqueda parcial en ambos campos
-      condiciones.push("(cat.nombre LIKE ? OR cat.codigo LIKE ?)");
+      condiciones.push("(COALESCE(cat.nombre, us.D_US) LIKE ? OR CAST(us.C_US AS CHAR) LIKE ?)");
       parametros.push(`%${busqueda}%`, `%${busqueda}%`);
     }
   }
@@ -1060,9 +1060,9 @@ const obtenerEstablecimientosPorMunicipio = async (
 
   const sql = `
     SELECT DISTINCT
-      cat.codigo AS valor,
+      CAST(us.C_US AS CHAR) AS valor,
       CONCAT(
-        COALESCE(cat.nombre, CAST(us.C_US AS CHAR)),
+        COALESCE(cat.nombre, us.D_US, CAST(us.C_US AS CHAR)),
         ' (RUPS: ',
         CAST(us.C_US AS CHAR),
         ')',
@@ -1075,7 +1075,7 @@ const obtenerEstablecimientosPorMunicipio = async (
           ELSE ''
         END
       ) AS etiqueta,
-      COALESCE(cat.nombre, CAST(us.C_US AS CHAR)) AS nombre,
+      COALESCE(cat.nombre, us.D_US, CAST(us.C_US AS CHAR)) AS nombre,
       CAST(us.C_US AS CHAR) AS rups,
       nivel.D_NIVEL_US AS nivel,
       muni.D_MUNICIPIO AS municipio,
@@ -1086,8 +1086,10 @@ const obtenerEstablecimientosPorMunicipio = async (
           THEN 1
         ELSE 0
       END AS activo
-    FROM cat_establecimientos cat
-    INNER JOIN BAS_BDR_US us 
+    -- Se parte de BAS_BDR_US para no perder establecimientos que aún no están
+    -- en cat_establecimientos (p. ej. los creados desde el panel admin).
+    FROM BAS_BDR_US us
+    LEFT JOIN cat_establecimientos cat
       ON cat.codigo COLLATE utf8mb4_unicode_ci = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
     LEFT JOIN BAS_BDR_NIVELES_US nivel
       ON nivel.C_NIVEL_US = us.C_NIVEL_US
@@ -1147,11 +1149,11 @@ const obtenerEstablecimientosPorRegion = async (
     const esSoloNumeros = /^\d+$/.test(busqueda.trim());
     if (esSoloNumeros) {
       // Búsqueda exacta en código O parcial en nombre
-      condiciones.push("(cat.codigo = ? OR cat.nombre LIKE ?)");
+      condiciones.push("(CAST(us.C_US AS CHAR) = ? OR COALESCE(cat.nombre, us.D_US) LIKE ?)");
       parametros.push(busqueda.trim(), `%${busqueda}%`);
     } else {
       // Búsqueda parcial en ambos campos
-      condiciones.push("(cat.nombre LIKE ? OR cat.codigo LIKE ?)");
+      condiciones.push("(COALESCE(cat.nombre, us.D_US) LIKE ? OR CAST(us.C_US AS CHAR) LIKE ?)");
       parametros.push(`%${busqueda}%`, `%${busqueda}%`);
     }
   }
@@ -1161,9 +1163,9 @@ const obtenerEstablecimientosPorRegion = async (
 
   const sql = `
     SELECT DISTINCT
-      cat.codigo AS valor,
+      CAST(us.C_US AS CHAR) AS valor,
       CONCAT(
-        COALESCE(cat.nombre, CAST(us.C_US AS CHAR)),
+        COALESCE(cat.nombre, us.D_US, CAST(us.C_US AS CHAR)),
         ' (RUPS: ',
         CAST(us.C_US AS CHAR),
         ')',
@@ -1176,7 +1178,7 @@ const obtenerEstablecimientosPorRegion = async (
           ELSE ''
         END
       ) AS etiqueta,
-      COALESCE(cat.nombre, CAST(us.C_US AS CHAR)) AS nombre,
+      COALESCE(cat.nombre, us.D_US, CAST(us.C_US AS CHAR)) AS nombre,
       CAST(us.C_US AS CHAR) AS rups,
       nivel.D_NIVEL_US AS nivel,
       muni.D_MUNICIPIO AS municipio,
@@ -1187,8 +1189,10 @@ const obtenerEstablecimientosPorRegion = async (
           THEN 1
         ELSE 0
       END AS activo
-    FROM cat_establecimientos cat
-    INNER JOIN BAS_BDR_US us 
+    -- Se parte de BAS_BDR_US para no perder establecimientos que aún no están
+    -- en cat_establecimientos (p. ej. los creados desde el panel admin).
+    FROM BAS_BDR_US us
+    LEFT JOIN cat_establecimientos cat
       ON cat.codigo COLLATE utf8mb4_unicode_ci = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
     LEFT JOIN BAS_BDR_NIVELES_US nivel
       ON nivel.C_NIVEL_US = us.C_NIVEL_US
