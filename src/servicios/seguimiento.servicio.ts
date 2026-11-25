@@ -4,6 +4,10 @@ import { obtenerPoolActual } from "../base_datos/pool";
 import { cache } from "../utilidades/cache.utilidad";
 import { obtenerTablaDetalleAt2 } from "./at2-detalle-fuente.servicio";
 import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
+import {
+  asegurarTablaAtributosEstablecimiento,
+  condicionNoExento
+} from "./establecimiento-atributos.servicio";
 
 const TABLA_SEGUIMIENTO = "AT2_SEGUIMIENTO_ENVIO";
 const NIVELES_HOSPITAL = [1, 2, 3];
@@ -184,6 +188,7 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
       AND (us.C_NIVEL_US NOT IN (${NIVELES_HOSPITAL.join(",")}) OR us.C_NIVEL_US IS NULL)
+      AND ${condicionNoExento("us")}
 
     UNION ALL
 
@@ -200,6 +205,7 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
       AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+      AND ${condicionNoExento("us")}
 
     UNION ALL
 
@@ -216,6 +222,7 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
       AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+      AND ${condicionNoExento("us")}
   )
 `;
 
@@ -226,6 +233,8 @@ export class SeguimientoServicio {
     }
 
     const db = obtenerExecutor(executor);
+    // Los establecimientos exentos de reportar no cuentan en el total esperado.
+    await asegurarTablaAtributosEstablecimiento();
     await db.query(`
       CREATE TABLE IF NOT EXISTS ${TABLA_SEGUIMIENTO} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -607,6 +616,7 @@ export class SeguimientoServicio {
             AND muni.C_MUNICIPIO = us.C_MUNICIPIO
           WHERE us.C_REGION = ?
             AND (us.C_NIVEL_US NOT IN (${NIVELES_HOSPITAL.join(",")}) OR us.C_NIVEL_US IS NULL)
+            AND ${condicionNoExento("us")}
 
           UNION ALL
 
@@ -623,6 +633,7 @@ export class SeguimientoServicio {
             AND muni.C_MUNICIPIO = us.C_MUNICIPIO
           WHERE us.C_REGION = ?
             AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+            AND ${condicionNoExento("us")}
 
           UNION ALL
 
@@ -639,6 +650,7 @@ export class SeguimientoServicio {
             AND muni.C_MUNICIPIO = us.C_MUNICIPIO
           WHERE us.C_REGION = ?
             AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+            AND ${condicionNoExento("us")}
         )
         SELECT
           meses.mes,

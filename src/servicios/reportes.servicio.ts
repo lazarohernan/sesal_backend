@@ -8,6 +8,10 @@ import {
 import { AlcanceRegionalError, REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
 import { seguimientoServicio, type EstadoSeguimiento } from "./seguimiento.servicio";
 import { CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS } from "../utilidades/at2-reglas.util";
+import {
+  asegurarTablaAtributosEstablecimiento,
+  condicionNoExento
+} from "./establecimiento-atributos.servicio";
 import { construirCatalogoAt2NuevoSql } from "../utilidades/at2-catalogo.util";
 
 const TOTAL_ATENCIONES_EXPRESSION =
@@ -450,6 +454,7 @@ export const obtenerControlEnviosAt2 = async (params: {
   const cacheKey = `reportes:control-envios-at2:${anio}:${construirRegionKey(regionIds)}`;
 
   const consultar = async () => {
+  await asegurarTablaAtributosEstablecimiento();
   if (opciones.sincronizar !== false) {
     await seguimientoServicio.asegurarTabla();
     await seguimientoServicio.sincronizarEnviosDesdeDetalleAnual(anio);
@@ -482,6 +487,7 @@ export const obtenerControlEnviosAt2 = async (params: {
         LEFT JOIN BAS_BDR_NIVELES_US nivel
           ON nivel.C_NIVEL_US = us.C_NIVEL_US
         WHERE us.C_REGION BETWEEN 1 AND 20
+          AND ${condicionNoExento("us")}
       ),
       base_servicios AS (
         SELECT
