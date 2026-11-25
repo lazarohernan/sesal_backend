@@ -97,6 +97,55 @@ const condicionEstablecimiento = (rups?: string | null) => {
   };
 };
 
+/** Municipio con el formato que usa el sistema: "<departamento>-<municipio>" (p. ej. "1-1"). */
+const condicionMunicipio = (municipio?: string | null, alias = "us") => {
+  if (!municipio) return { sql: "", params: [] as string[] };
+  return {
+    sql: `AND CONCAT(${alias}.C_DEPARTAMENTO, '-', ${alias}.C_MUNICIPIO) = ?`,
+    params: [municipio]
+  };
+};
+
+/** Verifica que el municipio exista dentro de las regiones permitidas y arma su etiqueta. */
+const resolverMunicipioResumenMaestro = async (
+  municipio: string,
+  regionIds?: number[] | null
+) => {
+  const pool = obtenerPoolActual();
+  const filtroRegion = condicionRegiones(regionIds);
+  const filtroMunicipio = condicionMunicipio(municipio);
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `
+      SELECT
+        LPAD(us.C_DEPARTAMENTO, 2, '0') AS departamento,
+        LPAD(us.C_MUNICIPIO, 2, '0') AS municipio,
+        TRIM(CAST(muni.D_MUNICIPIO AS CHAR)) AS nombre
+      FROM BAS_BDR_US us
+      LEFT JOIN BAS_BDR_MUNICIPIOS muni
+        ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
+      WHERE 1 = 1
+        ${filtroMunicipio.sql}
+        ${filtroRegion.sql}
+      LIMIT 1
+    `,
+    [...filtroMunicipio.params, ...filtroRegion.params]
+  );
+
+  const registro = rows[0];
+  if (!registro) {
+    throw new AlcanceRegionalError(
+      "El municipio indicado no existe o no pertenece a la región seleccionada o autorizada.",
+      403,
+      "MUNICIPIO_NO_AUTORIZADO"
+    );
+  }
+
+  const codigo = `${registro.departamento}${registro.municipio}`;
+  const nombre = limpiarTextoReporte(registro.nombre, codigo);
+  return { codigo: municipio, etiqueta: `Municipio ${codigo} · ${nombre}` };
+};
+
 const construirEtiquetaEstablecimiento = (params: {
   nombre: string;
   rups: string;
@@ -241,18 +290,24 @@ export const obtenerResumenMaestroAt2 = async (params: {
   mesFin: number;
   regionIds?: number[] | null;
   rups?: string | null;
+  municipio?: string | null;
 }): Promise<ResumenMaestroAt2Resultado> => {
   const { anio, mesInicio, mesFin, regionIds, rups } = params;
   const establecimiento = rups
     ? await resolverEstablecimientoResumenMaestro(rups, regionIds)
     : null;
-  const cacheKey = `reportes:resumen-maestro-at2:${anio}:${mesInicio}-${mesFin}:${construirRegionKey(regionIds)}:${establecimiento?.rups ?? "todos"}`;
+  // Si se pide un establecimiento, el municipio no aplica.
+  const municipio = !establecimiento && params.municipio
+    ? await resolverMunicipioResumenMaestro(params.municipio, regionIds)
+    : null;
+  const cacheKey = `reportes:resumen-maestro-at2:${anio}:${mesInicio}-${mesFin}:${construirRegionKey(regionIds)}:${establecimiento?.rups ?? "todos"}:${municipio?.codigo ?? "todos"}`;
 
   return cache.getOrSet(cacheKey, async () => {
   const pool = obtenerPoolActual();
   const fuenteDetalle = construirFuenteDetalleAt2([anio]);
   const filtroRegion = condicionRegiones(regionIds);
   const filtroEstablecimiento = condicionEstablecimiento(establecimiento?.rups);
+  const filtroMunicipio = condicionMunicipio(municipio?.codigo);
   const [versionesRows] = await pool.query<RowDataPacket[]>(
     `SELECT DISTINCT det.V_FORMULARIO
        FROM ${fuenteDetalle}
@@ -261,8 +316,9 @@ export const obtenerResumenMaestroAt2 = async (params: {
       WHERE det.N_ANIO = ?
         AND det.N_MES BETWEEN ? AND ?
         ${filtroRegion.sql}
-        ${filtroEstablecimiento.sql}`,
-    [anio, mesInicio, mesFin, ...filtroRegion.params, ...filtroEstablecimiento.params]
+        ${filtroEstablecimiento.sql}
+        ${filtroMunicipio.sql}`,
+    [anio, mesInicio, mesFin, ...filtroRegion.params, ...filtroEstablecimiento.params, ...filtroMunicipio.params]
   );
   const versionesPresentes = new Set(
     versionesRows.map((fila) => String(fila.V_FORMULARIO ?? ""))
@@ -316,11 +372,21 @@ export const obtenerResumenMaestroAt2 = async (params: {
           AND CAST(TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) AS UNSIGNED) BETWEEN 1 AND ?
           ${filtroRegion.sql}
           ${filtroEstablecimiento.sql}
+          ${filtroMunicipio.sql}
         GROUP BY CAST(TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) AS UNSIGNED)
       ) agg ON agg.numero = conceptos.numero
       ORDER BY conceptos.numero
     `,
-    [maxConcepto, anio, mesInicio, mesFin, maxConcepto, ...filtroRegion.params, ...filtroEstablecimiento.params]
+    [
+      maxConcepto,
+      anio,
+      mesInicio,
+      mesFin,
+      maxConcepto,
+      ...filtroRegion.params,
+      ...filtroEstablecimiento.params,
+      ...filtroMunicipio.params
+    ]
   );
 
   const filasConsultadas = rows.map((row) => {
@@ -353,7 +419,7 @@ export const obtenerResumenMaestroAt2 = async (params: {
   });
 
   return {
-    nivel: establecimiento?.etiqueta ?? normalizarNivelReporte(regionIds),
+    nivel: establecimiento?.etiqueta ?? municipio?.etiqueta ?? normalizarNivelReporte(regionIds),
     anio,
     mesInicio,
     mesFin,
