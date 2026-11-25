@@ -22,7 +22,8 @@ export const obtenerIndicadoresMunicipalesControlador = async (
     reply.header("Cache-Control", "private, no-store");
     reply.header("Vary", "Cookie, Authorization");
 
-    const { anio, departamentoId, limite, regionId } = request.query as Record<string, string | undefined>;
+    const { anio, departamentoId, limite, regionId, nivel } = request.query as Record<string, string | undefined>;
+    const nivelAtencion = nivel === "001" || nivel === "002" ? nivel : undefined;
 
     const anioNumero = anio ? Number(anio) : undefined;
     const departamentoNumero = Number(departamentoId);
@@ -60,7 +61,8 @@ export const obtenerIndicadoresMunicipalesControlador = async (
       anio: anioNumero,
       departamentoId: departamentoNumero,
       limite: limiteSeguro,
-      regionIds: regionesPermitidas ?? undefined
+      regionIds: regionesPermitidas ?? undefined,
+      nivel: nivelAtencion
     });
 
     return reply.status(200).send({

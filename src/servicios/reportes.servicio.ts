@@ -18,6 +18,8 @@ export interface IndicadoresMunicipalesParams {
   departamentoId: number;
   limite: number;
   regionIds?: number[];
+  /** "001" primer nivel, "002" segundo nivel; sin valor = ambos. */
+  nivel?: "001" | "002";
 }
 
 export interface IndicadoresMunicipalesTotales {
@@ -226,8 +228,8 @@ const resolverEstablecimientoResumenMaestro = async (
 export const obtenerIndicadoresMunicipales = async (
   params: IndicadoresMunicipalesParams
 ): Promise<IndicadoresMunicipalesTotales> => {
-  const { anio, departamentoId, regionIds } = params;
-  const cacheKey = `reportes:indicadores-municipales:${anio ?? "todos"}:${departamentoId}:${construirRegionKey(regionIds)}`;
+  const { anio, departamentoId, regionIds, nivel } = params;
+  const cacheKey = `reportes:indicadores-municipales:${anio ?? "todos"}:${departamentoId}:${construirRegionKey(regionIds)}:${nivel ?? "ambos"}`;
 
   return cache.getOrSet(cacheKey, async () => {
   const pool = obtenerPoolActual();
@@ -247,6 +249,12 @@ export const obtenerIndicadoresMunicipales = async (
     }
   }
 
+  // Mismo criterio que la dimensión NIVEL_OPERATIVO del pivot: C_NIVEL_US 1-3 = segundo nivel.
+  const condicionNivel = nivel === "002"
+    ? "AND C_NIVEL_US IN (1, 2, 3)"
+    : nivel === "001"
+      ? "AND (C_NIVEL_US IS NULL OR C_NIVEL_US NOT IN (1, 2, 3))"
+      : "";
   const condicionAnio = anio ? "det.N_ANIO = ? AND" : "";
   const query = `
     SELECT
@@ -261,6 +269,7 @@ export const obtenerIndicadoresMunicipales = async (
         FROM BAS_BDR_US
       WHERE C_DEPARTAMENTO = ?
       ${condicionRegion}
+      ${condicionNivel}
     ) us
     STRAIGHT_JOIN ${fuenteDetalle}
       ON det.C_US COLLATE utf8mb4_unicode_ci = us.C_US
