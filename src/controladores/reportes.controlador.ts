@@ -104,16 +104,24 @@ export const obtenerResumenMaestroAt2Controlador = async (
     reply.header("Cache-Control", "private, no-store");
     reply.header("Vary", "Cookie, Authorization");
 
-    const { anio, mesInicio, mesFin, regionId } = request.query as Record<string, string | undefined>;
+    const { anio, mesInicio, mesFin, regionId, rups } = request.query as Record<string, string | undefined>;
     const anioNumero = sanitizarEntero(anio, 2008, 2099);
     const mesInicioNumero = sanitizarEntero(mesInicio ?? "1", 1, 12);
     const mesFinNumero = sanitizarEntero(mesFin ?? "12", 1, 12);
     const regionNumero = regionId ? sanitizarEntero(regionId, 1, 20) : undefined;
+    const rupsLimpio = rups?.trim() ? rups.trim() : undefined;
 
     if (anioNumero === null || mesInicioNumero === null || mesFinNumero === null || regionNumero === null) {
       return reply.status(400).send({
         codigo: "PARAMETRO_INVALIDO",
         mensaje: "Debe indicar año, rango de meses y región válidos."
+      });
+    }
+
+    if (rupsLimpio && !/^\d+$/.test(rupsLimpio)) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El código RUPS del establecimiento debe ser numérico."
       });
     }
 
@@ -129,7 +137,8 @@ export const obtenerResumenMaestroAt2Controlador = async (
       anio: anioNumero,
       mesInicio: mesInicioNumero,
       mesFin: mesFinNumero,
-      regionIds: regionesPermitidas
+      regionIds: regionesPermitidas,
+      rups: rupsLimpio
     });
 
     return reply.status(200).send({

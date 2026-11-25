@@ -337,81 +337,64 @@ export const obtenerIndicadoresTableroEgresos = async (
       const filtroGeneral = construirFiltroTablero(params, "g");
       const filtroDiagnosticos = construirFiltroTablero(params, "d");
       const filtroOperaciones = construirFiltroTablero(params, "o");
-      const filtroPartos = construirFiltroTablero(params, "d");
-
-      const resumenSql = `
-        SELECT
-          general.totalEgresos,
-          general.estanciaPromedio,
-          diagnosticos.totalDiagnosticos,
-          operaciones.totalOperaciones,
-          partos.totalPartos,
-          adolescentes.totalPartosAdolescentes,
-          general.referidos
-        FROM (
-          SELECT
+      // Un único agregado por fuente alimenta el resumen y los doce meses.
+      // ROLLUP conserva el promedio ponderado y los registros fuera de 1..12.
+      // La normalización CIE y el vínculo con el egreso se mantienen intactos.
+      const resumenRitmoSql = `
+        WITH general AS (
+          SELECT g.N_MES AS mes, GROUPING(g.N_MES) AS esTotal,
             COUNT(*) AS totalEgresos,
             ROUND(AVG(COALESCE(g.Q_DIAS_ESTANCIA, 0)), 2) AS estanciaPromedio,
             COALESCE(SUM(CASE WHEN COALESCE(g.C_US_REFERIDO, 0) <> 0 THEN 1 ELSE 0 END), 0) AS referidos
-            FROM ${TABLA_GENERAL} g
-            ${filtroGeneral.clause}
-        ) general
-        CROSS JOIN (
-          SELECT COUNT(*) AS totalDiagnosticos
-            FROM ${TABLA_DIAGNOSTICOS} d
-            ${filtroDiagnosticos.clause}
-            ${filtroDiagnosticos.clause ? "AND" : "WHERE"} EXISTS (
-              SELECT 1
-              FROM ${TABLA_GENERAL} g_rel
-              WHERE g_rel.C_US = d.C_US
-                AND g_rel.N_ANIO = d.N_ANIO
-                AND g_rel.N_MES = d.N_MES
-                AND g_rel.N_PAGINA = d.N_PAGINA
-            )
-        ) diagnosticos
-        CROSS JOIN (
-          SELECT COUNT(*) AS totalOperaciones
-            FROM ${TABLA_OPERACIONES} o
-            ${filtroOperaciones.clause}
-            ${filtroOperaciones.clause ? "AND" : "WHERE"} EXISTS (
-              SELECT 1
-              FROM ${TABLA_GENERAL} g_rel
-              WHERE g_rel.C_US = o.C_US
-                AND g_rel.N_ANIO = o.N_ANIO
-                AND g_rel.N_MES = o.N_MES
-                AND g_rel.N_PAGINA = o.N_PAGINA
-            )
-        ) operaciones
-        CROSS JOIN (
-          SELECT COUNT(DISTINCT CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA)) AS totalPartos
-            FROM ${TABLA_DIAGNOSTICOS} d
-            ${filtroPartos.clause}
-            ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionPartoCieSql("d")}
-              AND EXISTS (
-                SELECT 1
-                FROM ${TABLA_GENERAL} g_rel
-                WHERE g_rel.C_US = d.C_US
-                  AND g_rel.N_ANIO = d.N_ANIO
-                  AND g_rel.N_MES = d.N_MES
-                  AND g_rel.N_PAGINA = d.N_PAGINA
-              )
-        ) partos
-        CROSS JOIN (
-          SELECT COUNT(*) AS totalPartosAdolescentes
-            FROM ${TABLA_GENERAL} g
-            ${filtroGeneral.clause}
-            ${filtroGeneral.clause ? "AND" : "WHERE"} g.C_PAC_EDAD_TIPO = 4
-              AND g.N_PAC_EDAD BETWEEN 10 AND 19
-              AND EXISTS (
-                SELECT 1
-                FROM ${TABLA_DIAGNOSTICOS} d_parto
-                WHERE d_parto.C_US = g.C_US
-                  AND d_parto.N_ANIO = g.N_ANIO
-                  AND d_parto.N_MES = g.N_MES
-                  AND d_parto.N_PAGINA = g.N_PAGINA
-                  AND ${construirCondicionPartoCieSql("d_parto")}
-              )
-        ) adolescentes
+          FROM ${TABLA_GENERAL} g
+          ${filtroGeneral.clause}
+          GROUP BY g.N_MES WITH ROLLUP
+        ), diagnosticos AS (
+          SELECT d.N_MES AS mes, GROUPING(d.N_MES) AS esTotal,
+            COUNT(*) AS totalDiagnosticos,
+            COUNT(DISTINCT CASE WHEN ${construirCondicionPartoCieSql("d")}
+              THEN CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA) END) AS totalPartos,
+            COUNT(DISTINCT CASE WHEN g_rel.C_PAC_EDAD_TIPO = 4
+              AND g_rel.N_PAC_EDAD BETWEEN 10 AND 19
+              AND ${construirCondicionPartoCieSql("d")}
+              THEN CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA) END) AS totalPartosAdolescentes
+          FROM ${TABLA_DIAGNOSTICOS} d
+          INNER JOIN ${TABLA_GENERAL} g_rel
+            ON g_rel.C_US = d.C_US AND g_rel.N_ANIO = d.N_ANIO
+            AND g_rel.N_MES = d.N_MES AND g_rel.N_PAGINA = d.N_PAGINA
+          ${filtroDiagnosticos.clause}
+          GROUP BY d.N_MES WITH ROLLUP
+        ), operaciones AS (
+          SELECT o.N_MES AS mes, GROUPING(o.N_MES) AS esTotal,
+            COUNT(*) AS totalOperaciones
+          FROM ${TABLA_OPERACIONES} o
+          ${filtroOperaciones.clause}
+          ${filtroOperaciones.clause ? "AND" : "WHERE"} EXISTS (
+            SELECT 1 FROM ${TABLA_GENERAL} g_rel
+            WHERE g_rel.C_US = o.C_US AND g_rel.N_ANIO = o.N_ANIO
+              AND g_rel.N_MES = o.N_MES AND g_rel.N_PAGINA = o.N_PAGINA
+          )
+          GROUP BY o.N_MES WITH ROLLUP
+        ), claves AS (
+          SELECT NULL AS mes, 1 AS esTotal
+          UNION ALL SELECT 1, 0 UNION ALL SELECT 2, 0 UNION ALL SELECT 3, 0
+          UNION ALL SELECT 4, 0 UNION ALL SELECT 5, 0 UNION ALL SELECT 6, 0
+          UNION ALL SELECT 7, 0 UNION ALL SELECT 8, 0 UNION ALL SELECT 9, 0
+          UNION ALL SELECT 10, 0 UNION ALL SELECT 11, 0 UNION ALL SELECT 12, 0
+        )
+        SELECT claves.mes, claves.esTotal,
+          COALESCE(general.totalEgresos, 0) AS totalEgresos,
+          COALESCE(general.estanciaPromedio, 0) AS estanciaPromedio,
+          COALESCE(general.referidos, 0) AS referidos,
+          COALESCE(diagnosticos.totalDiagnosticos, 0) AS totalDiagnosticos,
+          COALESCE(diagnosticos.totalPartos, 0) AS totalPartos,
+          COALESCE(diagnosticos.totalPartosAdolescentes, 0) AS totalPartosAdolescentes,
+          COALESCE(operaciones.totalOperaciones, 0) AS totalOperaciones
+        FROM claves
+        LEFT JOIN general ON general.mes <=> claves.mes AND general.esTotal = claves.esTotal
+        LEFT JOIN diagnosticos ON diagnosticos.mes <=> claves.mes AND diagnosticos.esTotal = claves.esTotal
+        LEFT JOIN operaciones ON operaciones.mes <=> claves.mes AND operaciones.esTotal = claves.esTotal
+        ORDER BY claves.esTotal DESC, claves.mes
       `;
 
       const sexoSql = `
@@ -444,66 +427,6 @@ export const obtenerIndicadoresTableroEgresos = async (
         GROUP BY etiqueta
         ORDER BY etiqueta
         LIMIT 30
-      `;
-
-      const ritmoSql = `
-        SELECT
-          meses.mes,
-          COALESCE(general.totalEgresos, 0) AS totalEgresos,
-          COALESCE(operaciones.totalOperaciones, 0) AS totalOperaciones,
-          COALESCE(partos.totalPartos, 0) AS totalPartos,
-          COALESCE(general.estanciaPromedio, 0) AS estanciaPromedio
-        FROM (
-          SELECT 1 AS mes UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4
-          UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8
-          UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL SELECT 12
-        ) meses
-        LEFT JOIN (
-          SELECT
-            g.N_MES AS mes,
-            COUNT(*) AS totalEgresos,
-            ROUND(AVG(COALESCE(g.Q_DIAS_ESTANCIA, 0)), 2) AS estanciaPromedio
-          FROM ${TABLA_GENERAL} g
-          ${filtroGeneral.clause}
-          GROUP BY g.N_MES
-        ) general
-          ON general.mes = meses.mes
-        LEFT JOIN (
-          SELECT
-            o.N_MES AS mes,
-            COUNT(*) AS totalOperaciones
-          FROM ${TABLA_OPERACIONES} o
-          ${filtroOperaciones.clause}
-          ${filtroOperaciones.clause ? "AND" : "WHERE"} EXISTS (
-            SELECT 1
-            FROM ${TABLA_GENERAL} g_rel
-            WHERE g_rel.C_US = o.C_US
-              AND g_rel.N_ANIO = o.N_ANIO
-              AND g_rel.N_MES = o.N_MES
-              AND g_rel.N_PAGINA = o.N_PAGINA
-          )
-          GROUP BY o.N_MES
-        ) operaciones
-          ON operaciones.mes = meses.mes
-        LEFT JOIN (
-          SELECT
-            d.N_MES AS mes,
-            COUNT(DISTINCT CONCAT_WS(':', d.C_US, d.N_ANIO, d.N_MES, d.N_PAGINA)) AS totalPartos
-          FROM ${TABLA_DIAGNOSTICOS} d
-          ${filtroPartos.clause}
-            ${filtroPartos.clause ? "AND" : "WHERE"} ${construirCondicionPartoCieSql("d")}
-            AND EXISTS (
-              SELECT 1
-              FROM ${TABLA_GENERAL} g_rel
-              WHERE g_rel.C_US = d.C_US
-                AND g_rel.N_ANIO = d.N_ANIO
-                AND g_rel.N_MES = d.N_MES
-                AND g_rel.N_PAGINA = d.N_PAGINA
-            )
-          GROUP BY d.N_MES
-        ) partos
-          ON partos.mes = meses.mes
-        ORDER BY meses.mes
       `;
 
       const establecimientosSql = `
@@ -540,33 +463,25 @@ export const obtenerIndicadoresTableroEgresos = async (
       `;
 
       const [
-        resumenRows,
+        resumenRitmoRows,
         sexoRows,
         edadesRows,
-        ritmoRows,
         establecimientosRows,
       ] = await Promise.all([
-        pool.query<RowDataPacket[]>(resumenSql, [
+        pool.query<RowDataPacket[]>(resumenRitmoSql, [
           ...filtroGeneral.values,
           ...filtroDiagnosticos.values,
           ...filtroOperaciones.values,
-          ...filtroPartos.values,
-          ...filtroGeneral.values,
         ]),
         pool.query<RowDataPacket[]>(sexoSql, filtroGeneral.values),
         pool.query<RowDataPacket[]>(edadesSql, filtroGeneral.values),
-        pool.query<RowDataPacket[]>(ritmoSql, [
-          ...filtroGeneral.values,
-          ...filtroOperaciones.values,
-          ...filtroPartos.values,
-        ]),
         pool.query<RowDataPacket[]>(establecimientosSql, [
           ...filtroOperaciones.values,
           ...filtroGeneral.values,
         ]),
       ]);
 
-      const resumenRow = resumenRows[0][0] ?? {};
+      const resumenRow: Record<string, unknown> = resumenRitmoRows[0].find((row) => Number(row.esTotal) === 1) ?? {};
 
       return {
         resumen: {
@@ -590,7 +505,7 @@ export const obtenerIndicadoresTableroEgresos = async (
           etiqueta: String(row.etiqueta ?? "Sin grupo"),
           totalEgresos: Number(row.totalEgresos ?? 0),
         })),
-        ritmoMensual: ritmoRows[0].map((row) => ({
+        ritmoMensual: resumenRitmoRows[0].filter((row) => Number(row.esTotal) === 0).map((row) => ({
           mes: Number(row.mes ?? 0),
           totalEgresos: Number(row.totalEgresos ?? 0),
           totalOperaciones: Number(row.totalOperaciones ?? 0),

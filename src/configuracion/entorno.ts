@@ -30,7 +30,14 @@ export const entorno = {
   esProduccion: process.env.NODE_ENV === "production",
   puerto: numero(process.env.PUERTO ?? process.env.PORT, 4000),
   cors: {
-    origenes: lista(process.env.CORS_ORIGINS)
+    origenes: (() => {
+      const configurados = lista(process.env.CORS_ORIGINS);
+      if (configurados.length) return configurados;
+      if (process.env.NODE_ENV === "production") {
+        return ["https://d2qfomxsnvb9vv.cloudfront.net"];
+      }
+      return [];
+    })()
   },
   admin: {
     token: (process.env.ADMIN_TOKEN ?? process.env.API_ADMIN_TOKEN ?? "").trim()

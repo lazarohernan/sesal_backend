@@ -33,6 +33,32 @@ export const errorHandler = (
     });
   }
 
+  const esCierrePrematuro = (() => {
+    const codigoError = "code" in err ? String(err.code) : "";
+    const mensajeError = (err.message || "").toLowerCase();
+    return (
+      codigoError === "ERR_STREAM_PREMATURE_CLOSE" ||
+      codigoError === "FST_ERR_REP_ALREADY_SENT" ||
+      mensajeError.includes("premature close")
+    );
+  })();
+
+  if (esCierrePrematuro) {
+    logger.warn("Cliente cerro la conexion antes de completar la respuesta", {
+      requestId,
+      path: request.url
+    });
+    if (!reply.sent) {
+      return reply.status(499).send({
+        status: 499,
+        codigo: "SOLICITUD_ABORTADA",
+        mensaje: "La solicitud fue cancelada",
+        requestId
+      });
+    }
+    return reply;
+  }
+
   const status = ("statusCode" in err ? err.statusCode : undefined) || 500;
   const codigo = ("code" in err ? err.code : undefined) || (status === 500 ? "ERROR_INTERNO" : "ERROR");
   const mensaje = err.message || "Error procesando la solicitud";

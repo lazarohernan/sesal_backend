@@ -37,7 +37,7 @@ assert.deepEqual(calcularTotalPacientesAtendidos(registros), {
   medicoEsp: 26
 });
 
-assert.match(validarConsistenciaAt2r(registros, 92) ?? "", /1 al 18/);
+assert.match(validarConsistenciaAt2r(registros, 92) ?? "", /grupos de edad/);
 sincronizarTotalPacientesAtendidos(registros);
 assert.deepEqual(registros.find((registro) => registro.concepto === 19), fila(19, 13, 16, 22, 26));
 assert.equal(validarConsistenciaAt2r(registros, 92), null);
@@ -53,4 +53,4 @@ const inconsistente = registros.map((registro) => ({ ...registro }));
 const mujeres = inconsistente.find((registro) => registro.concepto === 20);
 assert.ok(mujeres);
 mujeres.enfermeraAux += 1;
-assert.match(validarConsistenciaAt2r(inconsistente, 92) ?? "", /20 \+ 21/);
+assert.match(validarConsistenciaAt2r(inconsistente, 92) ?? "", /mujeres \+ hombres/);

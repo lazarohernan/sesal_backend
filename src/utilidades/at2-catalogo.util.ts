@@ -85,17 +85,17 @@ export const CONCEPTOS_AT2_FORMULARIO_NUEVO: ConceptoAt2Catalogo[] = [
   { numero: 79, descripcion: "Atenciones por psicología-psiquiatría" },
   { numero: 80, descripcion: "Atenciones brindadas a Migrantes Irregulares" },
   { numero: 81, descripcion: "Atenciones brindadas a Migrantes hondureños retornados" },
-  { numero: 82, descripcion: "Garífuna" },
-  { numero: 83, descripcion: "Negro Inglés" },
-  { numero: 84, descripcion: "Tolupán" },
-  { numero: 85, descripcion: "Pech (Paya)" },
-  { numero: 86, descripcion: "Misquito" },
-  { numero: 87, descripcion: "Nahoa" },
-  { numero: 88, descripcion: "Lenca" },
-  { numero: 89, descripcion: "Tawaka (Sumo)" },
-  { numero: 90, descripcion: "Maya Chortí" },
+  { numero: 82, descripcion: "Maya Chortí" },
+  { numero: 83, descripcion: "Lenca" },
+  { numero: 84, descripcion: "Misquito" },
+  { numero: 85, descripcion: "Nahua" },
+  { numero: 86, descripcion: "Pech (Paya)" },
+  { numero: 87, descripcion: "Tolupán" },
+  { numero: 88, descripcion: "Tawaka (Sumo)" },
+  { numero: 89, descripcion: "Garífuna" },
+  { numero: 90, descripcion: "Negro Inglés" },
   { numero: 91, descripcion: "Otro" },
-  { numero: 92, descripcion: "No Sabe / Ninguno" }
+  { numero: 92, descripcion: "No sabe / Ninguno" }
 ];
 
 const escaparSql = (valor: string) => valor.replace(/'/g, "''");

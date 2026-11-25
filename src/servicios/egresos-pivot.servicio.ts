@@ -1,6 +1,7 @@
 import type { RowDataPacket } from "mysql2";
 import { obtenerPoolActual } from "../base_datos/pool";
 import { cache, CACHE_TTL } from "../utilidades/cache.utilidad";
+import { ordenarValoresColumnaPivotSiAplica } from "../utilidades/pivot-orden.util";
 import {
   construirCondicionAbortoCieSql,
   construirCondicionEmbarazoCieSql,
@@ -39,6 +40,8 @@ type JoinKey =
 interface QueryJoinContext {
   anios?: number[];
   regionIds?: number[] | null;
+  /** Cuando hay filtro CIE, forzar INNER JOIN de diagnóstico/CIE para recortar temprano. */
+  innerDiagnosticoCie?: boolean;
 }
 
 interface DimensionDef {
@@ -460,8 +463,8 @@ const JOIN_DEFINITIONS: Record<JoinKey, { sql: (context: QueryJoinContext) => st
     },
   },
   DX_RAW: {
-    sql: () => `
-      LEFT JOIN EHO_BDT_EGR_DIAGNOSTICOS dx_raw
+    sql: (context) => `
+      ${context.innerDiagnosticoCie ? "INNER" : "LEFT"} JOIN EHO_BDT_EGR_DIAGNOSTICOS dx_raw
         ON dx_raw.C_US = g.C_US
        AND dx_raw.N_ANIO = g.N_ANIO
        AND dx_raw.N_MES = g.N_MES
@@ -470,8 +473,8 @@ const JOIN_DEFINITIONS: Record<JoinKey, { sql: (context: QueryJoinContext) => st
   },
   CIE_DX_RAW: {
     dependsOn: ["DX_RAW"],
-    sql: () => `
-      LEFT JOIN EHO_BDR_CIE cie_dx_raw
+    sql: (context) => `
+      ${context.innerDiagnosticoCie ? "INNER" : "LEFT"} JOIN EHO_BDR_CIE cie_dx_raw
         ON cie_dx_raw.C_CIE = dx_raw.C_CIE
     `,
   },
@@ -1212,7 +1215,10 @@ const pivotearColumnas = (
   for (const column of totalesDirectosPorColumna?.keys() ?? []) {
     dynamicColumns.add(column);
   }
-  const dynamicColumnList = Array.from(dynamicColumns);
+  const dynamicColumnList = ordenarValoresColumnaPivotSiAplica(
+    Array.from(dynamicColumns),
+    columnDimensions.map((dimension) => dimension.id)
+  );
   const measureTotalLabels = measures
     .filter(esMedidaAcumulable)
     .map((measure) => measure.label);
@@ -1559,6 +1565,62 @@ const construirFiltrosCieCatalogoCombinados = (
   payload: EgresosPivotPayload,
   enLinea: boolean
 ) => {
+  const valoresCategoria = obtenerValoresFiltroDimension(payload, "CIE_CATEGORIA");
+  const puedeUsarSubconsultaCie = valoresCategoria.length === 0;
+
+  // Capítulos/grupos sin categoría: resolver C_CIE en catálogo y filtrar diagnósticos por índice.
+  if (puedeUsarSubconsultaCie) {
+    const condiciones: string[] = [];
+    const params: Array<string | number> = [];
+
+    for (const dimensionId of ["CIE_CAPITULO", "CIE_GRUPO"]) {
+      const values = obtenerValoresFiltroDimension(payload, dimensionId);
+      if (!values.length) continue;
+      const filtro = construirCondicionFiltroCieCatalogo(
+        dimensionId,
+        values,
+        "cie_f",
+        enLinea ? "dx_raw" : "d_f"
+      );
+      if (!filtro.condition) continue;
+      condiciones.push(filtro.condition);
+      params.push(...filtro.params);
+    }
+
+    if (!condiciones.length) {
+      return { clauses: [] as string[], params: [] as Array<string | number> };
+    }
+
+    const subconsultaCie = `
+      SELECT cie_f.C_CIE
+      FROM EHO_BDR_CIE cie_f
+      WHERE ${condiciones.join(" AND ")}
+    `;
+
+    if (enLinea) {
+      return {
+        clauses: [`dx_raw.C_CIE IN (${subconsultaCie})`],
+        params,
+      };
+    }
+
+    return {
+      clauses: [`
+        EXISTS (
+          SELECT 1
+          FROM EHO_BDT_EGR_DIAGNOSTICOS d_f
+          WHERE d_f.N_ANIO = g.N_ANIO
+            AND d_f.C_CIE IN (${subconsultaCie})
+            AND d_f.C_US = g.C_US
+            AND d_f.N_MES = g.N_MES
+            AND d_f.N_PAGINA = g.N_PAGINA
+        )
+      `],
+      params,
+    };
+  }
+
+  // Categoría (y mezclas): mantener lógica previa sobre alias unidos / EXISTS con JOIN.
   const aliasCie = enLinea ? "cie_dx_raw" : "cie_f";
   const aliasDiagnostico = enLinea ? "dx_raw" : "d_f";
   const condiciones: string[] = [];
@@ -2081,14 +2143,18 @@ const obtenerValoresDimensionEgresosSinCache = async (
   if (dimensionId === "ESTABLECIMIENTO") {
     const textoBusqueda = busqueda?.trim();
     const params: Array<string | number> = [];
+    // Catálogo BAS_BDR_US (~2k) + EXISTS por PK de egresos: evita escanear EHO_BDT_EGR_GENERAL (~5.6M).
     let sql = `
       SELECT
-        g.C_US AS valor,
-        CONCAT(g.C_US, ' - ', COALESCE(NULLIF(TRIM(us.D_US), ''), 'Sin nombre')) AS etiqueta
-      FROM EHO_BDT_EGR_GENERAL g
-      LEFT JOIN BAS_BDR_US us
-        ON us.C_US = g.C_US
-      WHERE g.C_US IS NOT NULL
+        us.C_US AS valor,
+        CONCAT(us.C_US, ' - ', COALESCE(NULLIF(TRIM(us.D_US), ''), 'Sin nombre')) AS etiqueta
+      FROM BAS_BDR_US us
+      WHERE us.C_US IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM EHO_BDT_EGR_GENERAL g
+          WHERE g.C_US = us.C_US
+        )
     `;
 
     if (regionIds?.length) {
@@ -2097,11 +2163,11 @@ const obtenerValoresDimensionEgresosSinCache = async (
     }
 
     if (textoBusqueda) {
-      sql += ` AND (CAST(g.C_US AS CHAR) LIKE ? OR us.D_US LIKE ?)`;
+      sql += ` AND (CAST(us.C_US AS CHAR) LIKE ? OR us.D_US LIKE ?)`;
       params.push(`%${textoBusqueda}%`, `%${textoBusqueda}%`);
     }
 
-    sql += ` GROUP BY g.C_US, us.D_US ORDER BY us.D_US, g.C_US LIMIT ?`;
+    sql += ` ORDER BY us.D_US, us.C_US LIMIT ?`;
     params.push(limiteFinal);
 
     const [rows] = await pool.query<RowDataPacket[]>(sql, params);
@@ -2744,6 +2810,16 @@ const ejecutarConsultaEgresosSinCache = async (
     .filter((dim): dim is DimensionDef => dim !== undefined)
     .map((dimension) => resolverDimensionConsulta(dimension, payload));
 
+  const tieneFiltroCie =
+    tieneFiltroDimension(payload, "CIE_CAPITULO") ||
+    tieneFiltroDimension(payload, "CIE_GRUPO") ||
+    tieneFiltroDimension(payload, "CIE_CATEGORIA");
+  const joinContext: QueryJoinContext = {
+    anios: aniosConsultados,
+    regionIds,
+    innerDiagnosticoCie: desglosarDiagnosticoEgreso && tieneFiltroCie,
+  };
+
   const fromClause = construirFromDinamico(
     recolectarJoinKeysConsulta({
       dimensions: allDims,
@@ -2751,7 +2827,7 @@ const ejecutarConsultaEgresosSinCache = async (
       measures: medidasSel,
       requiereAlcanceRegional: Boolean(regionIds?.length),
     }),
-    { anios: aniosConsultados, regionIds }
+    joinContext
   );
 
   const selectParts = [
@@ -2804,7 +2880,7 @@ const ejecutarConsultaEgresosSinCache = async (
         measures: medidasSel,
         requiereAlcanceRegional: Boolean(regionIds?.length),
       }),
-      { anios: aniosConsultados, regionIds }
+      joinContext
     );
     const sqlTotalesFila = [
       `SELECT ${[
@@ -2842,7 +2918,7 @@ const ejecutarConsultaEgresosSinCache = async (
         measures: medidasSel,
         requiereAlcanceRegional: Boolean(regionIds?.length),
       }),
-      { anios: aniosConsultados, regionIds }
+      joinContext
     );
     const sqlTotalesColumna = [
       `SELECT ${[
@@ -2890,7 +2966,7 @@ const ejecutarConsultaEgresosSinCache = async (
           measures: medidasSel,
           requiereAlcanceRegional: Boolean(regionIds?.length),
         }),
-        { anios: aniosConsultados, regionIds }
+        joinContext
       );
       const totalSql = `
         SELECT ${medidasSel.map((measure) => `${measure.expression} AS \`${measure.label}\``).join(", ")}

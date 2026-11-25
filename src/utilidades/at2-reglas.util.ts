@@ -93,15 +93,15 @@ export const validarConsistenciaAt2r = (
     const espontaneasReferidas = valor(22, campo.key) + valor(23, campo.key);
 
     if (sumaEdad !== concepto19) {
-      return `${campo.label}: la suma de conceptos 1 al 18 (${formatearEntero(sumaEdad)}) debe ser igual al concepto 19 (${formatearEntero(concepto19)}).`;
+      return `${campo.label}: la suma por grupos de edad da ${formatearEntero(sumaEdad)}, pero el total de pacientes atendidos es ${formatearEntero(concepto19)}.`;
     }
 
     if (mujeresHombres !== concepto19) {
-      return `${campo.label}: conceptos 20 + 21 (${formatearEntero(mujeresHombres)}) deben ser igual al concepto 19 (${formatearEntero(concepto19)}).`;
+      return `${campo.label}: mujeres + hombres da ${formatearEntero(mujeresHombres)}, y debe coincidir con el total de pacientes atendidos (${formatearEntero(concepto19)}).`;
     }
 
     if (espontaneasReferidas !== concepto19) {
-      return `${campo.label}: conceptos 22 + 23 (${formatearEntero(espontaneasReferidas)}) deben ser igual al concepto 19 (${formatearEntero(concepto19)}).`;
+      return `${campo.label}: atenciones espontáneas + referidas da ${formatearEntero(espontaneasReferidas)}, y debe coincidir con el total de pacientes atendidos (${formatearEntero(concepto19)}).`;
     }
   }
 

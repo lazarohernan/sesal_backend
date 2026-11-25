@@ -13,6 +13,17 @@ import {
   obtenerAniosDetalleAt2Disponibles,
   obtenerTablaDetalleAt2
 } from "./at2-detalle-fuente.servicio";
+import { consultarSql } from "../utilidades/mysql-consulta.utilidad";
+import { ordenarValoresColumnaPivot } from "../utilidades/pivot-orden.util";
+import {
+  JOIN_CAT_ESTABLECIMIENTO,
+  JOIN_DETALLE_US,
+  JOIN_DETALLE_US_INNER,
+  JOIN_NIVELES_US,
+  NIVEL_CATALOGO_ETIQUETA_SQL,
+  NIVEL_ESTABLECIMIENTO_ETIQUETA_SQL,
+  RUPS_VISIBLE_SQL
+} from "../utilidades/sql-joins.util";
 
 const tomarPool = () => obtenerPoolActual();
 
@@ -25,6 +36,7 @@ type JoinKey =
   | "cat_region"
   | "deptos"
   | "municipios"
+  | "niveles_us"
   | "cat_nivel_establecimiento"
   | "cat_nivel_operativo"
   | "cat_formularios"
@@ -122,21 +134,21 @@ export interface PivotCatalogo {
 // JOINs con COLLATE explícito para evitar errores de mezcla de collations
 // CAST AS CHAR produce utf8mb4_0900_ai_ci, pero las tablas cat_* usan utf8mb4_unicode_ci
 const JOIN_DEFINITIONS: Record<JoinKey, string> = {
-  us: "LEFT JOIN BAS_BDR_US us ON det.C_US COLLATE utf8mb4_unicode_ci = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci",
+  us: JOIN_DETALLE_US,
   cat_concepto:
     "LEFT JOIN cat_conceptos cat_concepto ON (TRIM(cat_concepto.codigo) COLLATE utf8mb4_unicode_ci = TRIM(det.C_CONCEPTO) COLLATE utf8mb4_unicode_ci OR TRIM(LEADING '0' FROM TRIM(cat_concepto.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci)",
   cat_concepto_ordenado:
     "LEFT JOIN cat_concepto_ordenado cat_concepto_ordenado ON (TRIM(cat_concepto_ordenado.codigo) COLLATE utf8mb4_unicode_ci = TRIM(det.C_CONCEPTO) COLLATE utf8mb4_unicode_ci OR TRIM(LEADING '0' FROM TRIM(cat_concepto_ordenado.codigo)) COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci)",
   concepto_ge_codigo:
     "LEFT JOIN (SELECT TRIM(LEADING '0' FROM TRIM(C_CONCEPTO)) AS codigo_normalizado, MAX(D_CONCEPTO) AS D_CONCEPTO FROM AT2_BDR_CONCEPTOS_GE WHERE V_FORMULARIO IS NULL GROUP BY TRIM(LEADING '0' FROM TRIM(C_CONCEPTO))) concepto_ge_codigo ON concepto_ge_codigo.codigo_normalizado COLLATE utf8mb4_unicode_ci = TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) COLLATE utf8mb4_unicode_ci",
-  cat_establecimiento:
-    "LEFT JOIN cat_establecimientos cat_establecimiento ON cat_establecimiento.codigo COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci",
+  cat_establecimiento: JOIN_CAT_ESTABLECIMIENTO,
   cat_region:
     "LEFT JOIN cat_regiones cat_region ON cat_region.codigo COLLATE utf8mb4_unicode_ci = CAST(COALESCE(us.C_REGION, det.C_US) AS CHAR) COLLATE utf8mb4_unicode_ci",
   deptos:
     "LEFT JOIN BAS_BDR_DEPARTAMENTOS deptos ON deptos.C_DEPARTAMENTO = us.C_DEPARTAMENTO",
   municipios:
     "LEFT JOIN BAS_BDR_MUNICIPIOS municipios ON municipios.C_DEPARTAMENTO = us.C_DEPARTAMENTO AND municipios.C_MUNICIPIO = us.C_MUNICIPIO",
+  niveles_us: JOIN_NIVELES_US,
   cat_nivel_establecimiento:
     "LEFT JOIN cat_nivel_establecimiento cat_nivel_establecimiento ON cat_nivel_establecimiento.codigo COLLATE utf8mb4_unicode_ci = CAST(us.C_NIVEL_US AS CHAR) COLLATE utf8mb4_unicode_ci",
   cat_nivel_operativo:
@@ -149,13 +161,13 @@ const JOIN_DEFINITIONS: Record<JoinKey, string> = {
 
 const ETIQUETA_ESTABLECIMIENTO_SQL = `
   CONCAT(
-    COALESCE(cat_establecimiento.nombre, us.D_US, CAST(det.C_US AS CHAR)),
+    COALESCE(cat_establecimiento.nombre, us.D_US, ${RUPS_VISIBLE_SQL}),
     ' (RUPS: ',
-    CAST(det.C_US AS CHAR),
+    ${RUPS_VISIBLE_SQL},
     ')',
     CASE
-      WHEN cat_nivel_establecimiento.descripcion IS NOT NULL
-        THEN CONCAT(' - ', cat_nivel_establecimiento.descripcion)
+      WHEN niveles_us.D_NIVEL_US IS NOT NULL
+        THEN CONCAT(' - ', niveles_us.D_NIVEL_US)
       ELSE ''
     END,
     CASE
@@ -245,15 +257,6 @@ const NIVEL_ESTABLECIMIENTO_CATALOGO_ORDEN_SQL = `
   END,
   descripcion
 `;
-
-const NIVEL_ESTABLECIMIENTO_ORDEN_ETIQUETA = new Map<string, number>([
-  ["Hospital Básico", 1],
-  ["Hospital General", 2],
-  ["Hospital de Especialidades", 3],
-  ["Instituto Hondureño de Seguridad Social", 4],
-  ["Unidad de Atención Primaria en Salud", 5],
-  ["Centro Integral de Salud", 6]
-]);
 
 const DIMENSIONES: Record<string, DimensionDefinition> = {
   ANIO: {
@@ -345,10 +348,10 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     alias: "establecimiento",
     type: "string",
     select: ETIQUETA_ESTABLECIMIENTO_SQL,
-    groupBy: "det.C_US, cat_establecimiento.nombre, us.D_US, cat_nivel_establecimiento.descripcion, municipios.D_MUNICIPIO",
-    valueExpr: "det.C_US",
-    joins: ["us", "cat_establecimiento", "cat_nivel_establecimiento", "municipios"],
-    orderBy: "COALESCE(cat_establecimiento.nombre, us.D_US, CAST(det.C_US AS CHAR))",
+    groupBy: `${RUPS_VISIBLE_SQL}, cat_establecimiento.nombre, us.D_US, niveles_us.D_NIVEL_US, municipios.D_MUNICIPIO`,
+    valueExpr: RUPS_VISIBLE_SQL,
+    joins: ["us", "cat_establecimiento", "niveles_us", "municipios"],
+    orderBy: `COALESCE(cat_establecimiento.nombre, us.D_US, ${RUPS_VISIBLE_SQL})`,
     catalog: {
       table: "cat_establecimientos",
       valueColumn: "codigo",
@@ -426,15 +429,15 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Nivel de Establecimiento de Salud",
     alias: "nivel_establecimiento",
     type: "string",
-    select: "cat_nivel_establecimiento.descripcion",
-    groupBy: `${NIVEL_ESTABLECIMIENTO_ORDEN_SQL}, cat_nivel_establecimiento.descripcion`,
+    select: NIVEL_ESTABLECIMIENTO_ETIQUETA_SQL,
+    groupBy: `${NIVEL_ESTABLECIMIENTO_ORDEN_SQL}, ${NIVEL_ESTABLECIMIENTO_ETIQUETA_SQL}`,
     valueExpr: "CAST(us.C_NIVEL_US AS CHAR)",
     joins: ["us", "cat_nivel_establecimiento"],
     orderBy: NIVEL_ESTABLECIMIENTO_ORDEN_SQL,
     catalog: {
       table: "cat_nivel_establecimiento",
       valueColumn: "codigo",
-      labelColumn: "descripcion",
+      labelColumn: NIVEL_CATALOGO_ETIQUETA_SQL,
       orderBy: NIVEL_ESTABLECIMIENTO_CATALOGO_ORDEN_SQL,
       preload: true
     }
@@ -585,7 +588,9 @@ const obtenerTablasDetalleDisponibles = async (): Promise<number[]> => {
 };
 
 const asegurarJoins = (joinsNecesarios: Set<JoinKey>): string => {
-  return Array.from(joinsNecesarios)
+  const resto = Array.from(joinsNecesarios).filter((clave) => clave !== "us");
+  const ordenados: JoinKey[] = joinsNecesarios.has("us") ? ["us", ...resto] : resto;
+  return ordenados
     .map((clave) => JOIN_DEFINITIONS[clave])
     .filter(Boolean)
     .join("\n");
@@ -1262,7 +1267,7 @@ const obtenerYearsDesdeFiltros = (filtros?: PivotFilter[]): number[] => {
   return valores.map((valor) => Number(valor)).filter((valor) => Number.isFinite(valor));
 };
 
-const resolverAniosConsultaPivot = async (payload: PivotQueryPayload): Promise<number[]> => {
+export const resolverAniosConsultaPivot = async (payload: PivotQueryPayload): Promise<number[]> => {
   const aniosFiltro = obtenerYearsDesdeFiltros(payload.filters);
   const periodos = await obtenerPeriodosDisponibles();
   let aniosDisponibles = periodos.map((p) => p.anio).sort((a, b) => a - b);
@@ -1521,8 +1526,6 @@ const transformarDatosPivot = (
   // Construir encabezados: dimensiones de fila + columnas dinámicas
   const cabecerasFijas = dimensionesFilas;
   const valoresColumnas = new Set<string>();
-  const ordenValoresColumnas: string[] = [];
-  const sortColumnas = new Map<string, string>();
   const limpiarValorColumna = (valor: unknown) => String(limpiarTextoPresentacion(valor) ?? "");
 
   // Recopilar todos los valores únicos de las dimensiones de columna
@@ -1530,13 +1533,7 @@ const transformarDatosPivot = (
     dimensionesColumnas.forEach(dim => {
       const valor = limpiarValorColumna(fila[dim]);
       if (valor && valor !== 'null' && valor !== 'undefined') {
-        if (!valoresColumnas.has(valor)) {
-          ordenValoresColumnas.push(valor);
-        }
         valoresColumnas.add(valor);
-        if (!sortColumnas.has(valor)) {
-          sortColumnas.set(valor, valor);
-        }
       }
     });
   });
@@ -1563,16 +1560,10 @@ const transformarDatosPivot = (
   const construirClaveColumna = (valorColumna: string, medida: { id: string }) =>
     medidas.length === 1 ? valorColumna : `${valorColumna}_${medida.id}`;
 
-  const valoresColumnasOrdenados = dimensionesColumnas.includes("NIVEL_ESTABLECIMIENTO")
-    ? ordenValoresColumnas.sort((a, b) => {
-        const ordenA = NIVEL_ESTABLECIMIENTO_ORDEN_ETIQUETA.get(a) ?? 99;
-        const ordenB = NIVEL_ESTABLECIMIENTO_ORDEN_ETIQUETA.get(b) ?? 99;
-        if (ordenA !== ordenB) return ordenA - ordenB;
-        return a.localeCompare(b, "es-HN", { numeric: true });
-      })
-    : Array.from(valoresColumnas).sort((a, b) =>
-        (sortColumnas.get(a) ?? a).localeCompare(sortColumnas.get(b) ?? b, "es-HN", { numeric: true })
-      );
+  const valoresColumnasOrdenados = ordenarValoresColumnaPivot(
+    Array.from(valoresColumnas),
+    dimensionesColumnas
+  );
   valoresColumnasOrdenados.forEach(valorColumna => {
     medidas.forEach(medida => {
       cabecerasColumnas.push(construirClaveColumna(valorColumna, medida));
@@ -1680,7 +1671,8 @@ const construirTotalGeneralPivotado = (
 };
 
 async function ejecutarConsultaConceptoOrdenadoOptimizada(
-  payload: PivotQueryPayload
+  payload: PivotQueryPayload,
+  opcionesSql: { signal?: AbortSignal; maxExecutionTimeMs?: number } = {}
 ): Promise<PivotQueryResult | null> {
   const filas = payload.rows ?? [];
   const columnas = payload.columns ?? [];
@@ -1743,9 +1735,13 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
       continue;
     }
 
-    if (filtro.field === "US") {
-      condiciones.push(`det.C_US IN (${valoresFiltro.map(() => "?").join(", ")})`);
-      parametros.push(...valoresFiltro.map((valor) => String(valor)));
+    if (filtro.field === "US" || filtro.field === "ESTABLECIMIENTO") {
+      const rups = valoresFiltro
+        .map((valor) => Number(valor))
+        .filter((valor) => Number.isFinite(valor) && valor > 0);
+      if (!rups.length) continue;
+      condiciones.push(`CAST(det.C_US AS UNSIGNED) IN (${rups.map(() => "?").join(", ")})`);
+      parametros.push(...rups);
       continue;
     }
 
@@ -1779,7 +1775,7 @@ async function ejecutarConsultaConceptoOrdenadoOptimizada(
   }
 
   const joins = [
-    "INNER JOIN BAS_BDR_US us ON us.C_US COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci"
+    JOIN_DETALLE_US_INNER
   ];
   if (incluyeMunicipio || filtros.some((filtro) => filtro.field === "MUNICIPIO")) {
     joins.push(
@@ -1829,8 +1825,7 @@ GROUP BY ${groupByParts.join(", ")}
 ORDER BY ${orderByParts.join(", ")}
 LIMIT ${limit}`;
 
-  const pool = tomarPool();
-  const [rows] = await pool.query<RowDataPacket[]>(sql, parametros);
+  const rows = await consultarSql(sql, parametros, opcionesSql);
   const metadataConceptos = await obtenerMetadataConceptoOrdenado();
   const medidas = [{ alias: "total_optimized", etiqueta: "Total de Atenciones", id: "TOTAL" }];
 
@@ -1905,7 +1900,7 @@ LIMIT ${limit}`;
 	FROM ${fromDetalle}
 	${joins.join("\n")}
 	WHERE ${condiciones.join(" AND ")}`;
-    const [totales] = await pool.query<RowDataPacket[]>(totalSql, parametros);
+    const totales = await consultarSql(totalSql, parametros, opcionesSql);
     totalGeneral = {
       "Total de Atenciones": Number(totales[0]?.total_optimized ?? 0)
     };
@@ -1959,12 +1954,24 @@ const generarClaveCachePivot = (payload: PivotQueryPayload): string => {
 export const estaConsultaPivotCacheada = (payload: PivotQueryPayload): boolean =>
   cache.hasFresh(generarClaveCachePivot(payload));
 
-export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise<PivotQueryResult> {
+export interface EjecutarConsultaPivotOpciones {
+  signal?: AbortSignal;
+  maxExecutionTimeMs?: number;
+}
+
+export async function ejecutarConsultaPivot(
+  payload: PivotQueryPayload,
+  opciones: EjecutarConsultaPivotOpciones = {}
+): Promise<PivotQueryResult> {
   const claveCache = generarClaveCachePivot(payload);
+  const opcionesSql = {
+    signal: opciones.signal,
+    maxExecutionTimeMs: opciones.maxExecutionTimeMs ?? 180_000
+  };
   return cache.getOrSet(
     claveCache,
     async () => {
-      const resultadoConceptoOrdenado = await ejecutarConsultaConceptoOrdenadoOptimizada(payload);
+      const resultadoConceptoOrdenado = await ejecutarConsultaConceptoOrdenadoOptimizada(payload, opcionesSql);
       if (resultadoConceptoOrdenado) {
         return resultadoConceptoOrdenado;
       }
@@ -2006,10 +2013,43 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
 
       const aniosConsulta = await resolverAniosConsultaPivot(payload);
 
-      const fromDetalle = construirFuenteDetalleAt2(aniosConsulta);
+      let fromDetalle = construirFuenteDetalleAt2(aniosConsulta);
+      // Reducir el detalle antes de los joins de catálogos. Mantener estos joins
+      // conserva las etiquetas históricas, los filtros y el tipo de las medidas.
+      // Solo SUM y dimensiones que no dependen del mes/servicio/registro individual.
+      const columnasResumen = new Set(["ANIO", "REGION", "MUNICIPIO"]);
+      const filtrosResumen = new Set([
+        "ANIO", "REGION", "DEPARTAMENTO", "MUNICIPIO", "US", "CONCEPTO", "CONCEPTO_ORDENADO"
+      ]);
+      const resumirDetalle = filas.length === 1 && filas[0] === "CONCEPTO_ORDENADO" &&
+        valoresSolicitud.length > 0 && valoresSolicitud.every((valor) =>
+          Object.hasOwnProperty.call(MEDIDAS, valor.field) &&
+          (valor.aggregation === undefined || valor.aggregation === "SUM")) &&
+        columnas.every((columna) => columnasResumen.has(columna)) &&
+        (payload.filters ?? []).every((filtro) => filtrosResumen.has(filtro.field));
+      let parametrosResumen: Array<string | number> = [];
+      if (resumirDetalle) {
+        parametrosResumen = [...aniosConsulta, ...parametros];
+        const filtroResumen = [`det.N_ANIO IN (${aniosConsulta.map(() => "?").join(", ")})`, ...condiciones];
+        const requiereUbicacion = (payload.filters ?? []).some((filtro) =>
+          ["REGION", "DEPARTAMENTO", "MUNICIPIO"].includes(filtro.field));
+        // C_US puede tener varias versiones en el catálogo: EXISTS evita
+        // multiplicar las medidas antes del join original de presentación.
+        const whereResumen = requiereUbicacion
+          ? `${filtroResumen[0]} AND EXISTS (SELECT 1 FROM (SELECT 1 AS n) scope
+              ${JOIN_DETALLE_US} WHERE ${condiciones.join(" AND ")})`
+          : filtroResumen.join(" AND ");
+        const claves = ["C_US", "N_ANIO", "C_CONCEPTO", "V_FORMULARIO"];
+        const campos = ["Q_AT_ENFERMERA_AUX", "Q_AT_ENFERMERA_PRO", "Q_AT_MEDICO_GEN", "Q_AT_MEDICO_ESP"];
+        fromDetalle = `(SELECT ${claves.map((campo) => `det.${campo}`).join(", ")},
+          ${campos.map((campo) => `SUM(COALESCE(det.${campo}, 0)) AS ${campo}`).join(", ")}
+          FROM ${fromDetalle}
+          WHERE ${whereResumen}
+          GROUP BY ${claves.map((campo) => `det.${campo}`).join(", ")}) det`;
+      }
       const anioPlaceholders = aniosConsulta.map(() => "?").join(", ");
       condiciones.unshift(`det.N_ANIO IN (${anioPlaceholders})`);
-      parametros.unshift(...aniosConsulta);
+      parametros.unshift(...parametrosResumen, ...aniosConsulta);
 
       const joinsSql = asegurarJoins(joins);
       const whereClause = condiciones.length ? `WHERE ${condiciones.join(" AND ")}` : "";
@@ -2032,8 +2072,7 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
         sql += `\nLIMIT ${limit}`;
       }
 
-      const pool = tomarPool();
-      const [rows] = await pool.query<RowDataPacket[]>(sql, parametros);
+      const rows = await consultarSql(sql, parametros, opcionesSql);
       let totalGeneral: Record<string, unknown> | null = null;
 
       if (payload.includeTotals && medidas.length) {
@@ -2041,7 +2080,7 @@ export async function ejecutarConsultaPivot(payload: PivotQueryPayload): Promise
           .map((medida) => `${medida.expresionSinAlias} AS ${medida.alias}`)
           .join(", ");
         const totalSql = `SELECT ${totalSelect} FROM ${fromDetalle}\n${joinsSql ? joinsSql + "\n" : ""}${whereClause}`;
-        const [totalRows] = await pool.query<RowDataPacket[]>(totalSql, parametros);
+        const totalRows = await consultarSql(totalSql, parametros, opcionesSql);
 
         if (totalRows[0]) {
           const totalNormalizado: Record<string, unknown> = {};

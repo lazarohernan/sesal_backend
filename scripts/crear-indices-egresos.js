@@ -64,6 +64,11 @@ const indexes = [
     name: "idx_egr_partos_anio_mes",
     columns: ["N_ANIO", "N_MES"],
   },
+  {
+    table: "EHO_BDR_CIE",
+    name: "idx_eho_bdr_cie_capitulo_grupo",
+    columns: ["C_CIE_CAPITULO", "C_CIE_GRUPO"],
+  },
 ];
 
 const quoteIdentifier = (identifier) => `\`${identifier.replace(/`/g, "``")}\``;

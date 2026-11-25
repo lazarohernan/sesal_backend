@@ -2,7 +2,9 @@ import type { FastifyPluginAsync } from "fastify";
 import { pool } from "../base_datos/pool";
 import { entorno } from "../configuracion/entorno";
 import { cache } from "../utilidades/cache.utilidad";
+import { invalidarJobsPivot } from "../servicios/pivot-jobs.servicio";
 import { requireAdminAccess } from "../middleware/admin.middleware";
+import { requireUserSession } from "../middleware/auth.middleware";
 
 let ultimoEstadoDB:
   | {
@@ -14,7 +16,7 @@ let ultimoEstadoDB:
 
 const healthRutas: FastifyPluginAsync = async (fastify) => {
   // Endpoint para verificar el estado de la conexion a la base de datos
-  fastify.get("/db", async (_request, reply) => {
+  fastify.get("/db", { preHandler: requireUserSession }, async (_request, reply) => {
     if (ultimoEstadoDB && ultimoEstadoDB.expiresAt > Date.now()) {
       return reply.status(ultimoEstadoDB.statusCode).send(ultimoEstadoDB.body);
     }
@@ -110,6 +112,7 @@ const healthRutas: FastifyPluginAsync = async (fastify) => {
     try {
       const statsBefore = cache.getStats({ includeKeys: false });
       cache.clear();
+      invalidarJobsPivot();
 
       return reply.send({
         success: true,

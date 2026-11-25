@@ -46,7 +46,7 @@ export const buildApp = async () => {
 
       const origenesPermitidos = entorno.cors.origenes;
       if (origenesPermitidos.length === 0) {
-        callback(null, true);
+        callback(null, !entorno.esProduccion);
         return;
       }
 

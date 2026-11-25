@@ -4,8 +4,10 @@ import { obtenerPoolActual } from "../base_datos/pool";
 import { AlcanceRegionalError, obtenerRegionesPermitidasUsuario, resolverRegionParaRegistro } from "../utilidades/alcance-regional.util";
 import { logger } from "../utilidades/registro.utilidad";
 import { cache } from "../utilidades/cache.utilidad";
+import { invalidarJobsPivot } from "../servicios/pivot-jobs.servicio";
 import { seguimientoServicio } from "../servicios/seguimiento.servicio";
 import { obtenerTablaDetalleAt2 } from "../servicios/at2-detalle-fuente.servicio";
+import { CONDICION_DETALLE_C_US } from "../utilidades/sql-joins.util";
 import {
   sincronizarTotalPacientesAtendidos,
   validarConsistenciaAt2r,
@@ -41,6 +43,7 @@ const invalidarCachesAt2 = (anio: number) => {
   cache.deleteByPrefix(`pivot:meses:${anio}`);
   cache.deleteByPrefix("reportes:");
   cache.deleteByPrefix("tablero:");
+  invalidarJobsPivot();
 };
 
 // -- Validacion y sanitizacion --
@@ -68,7 +71,7 @@ const NIVELES_HOSPITAL = [1, 2, 3];
 const esCodigoHospital = async (rups: string): Promise<boolean> => {
   const pool = obtenerPoolActual();
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT 1 FROM BAS_BDR_US WHERE CAST(C_US AS CHAR) = ? AND C_NIVEL_US IN (${NIVELES_HOSPITAL.join(',')}) LIMIT 1`,
+    `SELECT 1 FROM BAS_BDR_US WHERE C_US = CAST(? AS UNSIGNED) AND C_NIVEL_US IN (${NIVELES_HOSPITAL.join(',')}) LIMIT 1`,
     [rups]
   );
   return rows.length > 0;
@@ -104,7 +107,7 @@ const validarRupsPerteneceARegion = async (
       C_REGION AS region,
       D_US AS establecimiento
      FROM BAS_BDR_US
-     WHERE CAST(C_US AS CHAR) = ?
+     WHERE C_US = CAST(? AS UNSIGNED)
      LIMIT 1`,
     [rups]
   );
@@ -188,7 +191,7 @@ export const guardarRegistroControlador = async (
       sanitizarCodigoRups(rups);
 
     const usarRegistroPorEstablecimiento = anioVal >= 2026;
-    const identificadorRegistro = usarRegistroPorEstablecimiento ? codigoRups : String(regionVal);
+    let identificadorRegistro = usarRegistroPorEstablecimiento ? codigoRups : String(regionVal);
 
     if (usarRegistroPorEstablecimiento && !identificadorRegistro) {
       return reply.status(400).send({
@@ -198,7 +201,7 @@ export const guardarRegistroControlador = async (
     }
 
     if (usarRegistroPorEstablecimiento && identificadorRegistro) {
-      await validarRupsPerteneceARegion(identificadorRegistro, regionVal);
+      identificadorRegistro = (await validarRupsPerteneceARegion(identificadorRegistro, regionVal)).rups;
     }
 
     const esHospital = identificadorRegistro ? await esCodigoHospital(identificadorRegistro) : false;
@@ -225,7 +228,7 @@ export const guardarRegistroControlador = async (
     const [versionesExistentes] = await pool.query<RowDataPacket[]>(
       `SELECT V_FORMULARIO, COUNT(*) AS total
        FROM ${tablaDetalle}
-       WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?
+       WHERE ${CONDICION_DETALLE_C_US} AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?
        GROUP BY V_FORMULARIO`,
       [identificadorRegistro, anioVal, mesVal, cServicio]
     );
@@ -355,7 +358,7 @@ export const guardarRegistroControlador = async (
 
       if (esEdicion) {
         await conn.query(
-          `DELETE FROM ${tablaDetalle} WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?`,
+          `DELETE FROM ${tablaDetalle} WHERE ${CONDICION_DETALLE_C_US} AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?`,
           [identificadorRegistro, anioVal, mesVal, cServicio]
         );
       }
@@ -461,7 +464,7 @@ export const eliminarRegistroControlador = async (
       sanitizarCodigoRups(establecimientoCodigo) ??
       sanitizarCodigoRups(establecimiento) ??
       sanitizarCodigoRups(rups);
-    const identificadorRegistro = anioVal >= 2026 ? codigoRups : String(regionVal);
+    let identificadorRegistro = anioVal >= 2026 ? codigoRups : String(regionVal);
 
     if (!identificadorRegistro) {
       return reply.status(400).send({
@@ -471,7 +474,7 @@ export const eliminarRegistroControlador = async (
     }
 
     if (anioVal >= 2026) {
-      await validarRupsPerteneceARegion(identificadorRegistro, regionVal);
+      identificadorRegistro = (await validarRupsPerteneceARegion(identificadorRegistro, regionVal)).rups;
     }
 
     const esHospital = await esCodigoHospital(identificadorRegistro);
@@ -501,7 +504,7 @@ export const eliminarRegistroControlador = async (
       await conn.beginTransaction();
       const [resultado] = await conn.query(
         `DELETE FROM ${tablaDetalle}
-         WHERE C_US = ?
+         WHERE ${CONDICION_DETALLE_C_US}
            AND N_ANIO = ?
            AND N_MES = ?
            AND C_SERVICIO = ?`,
@@ -602,7 +605,7 @@ export const obtenerRegistroControlador = async (
       sanitizarCodigoRups(establecimientoCodigo) ??
       sanitizarCodigoRups(establecimiento) ??
       sanitizarCodigoRups(rups);
-    const identificadorRegistro = anioVal >= 2026 ? codigoRups : String(regionVal);
+    let identificadorRegistro = anioVal >= 2026 ? codigoRups : String(regionVal);
 
     if (!identificadorRegistro) {
       return reply.status(400).send({
@@ -612,7 +615,7 @@ export const obtenerRegistroControlador = async (
     }
 
     if (anioVal >= 2026) {
-      await validarRupsPerteneceARegion(identificadorRegistro, regionVal);
+      identificadorRegistro = (await validarRupsPerteneceARegion(identificadorRegistro, regionVal)).rups;
     }
 
     const esHospitalGet = identificadorRegistro ? await esCodigoHospital(identificadorRegistro) : false;
@@ -626,7 +629,7 @@ export const obtenerRegistroControlador = async (
     const [versiones] = await pool.query<RowDataPacket[]>(
       `SELECT V_FORMULARIO, COUNT(*) AS total
        FROM ${tablaDetalle}
-       WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?
+       WHERE ${CONDICION_DETALLE_C_US} AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ?
        GROUP BY V_FORMULARIO`,
       [identificadorRegistro, anioVal, mesVal, cServicioGet]
     );
@@ -648,7 +651,7 @@ export const obtenerRegistroControlador = async (
         Q_AT_MEDICO_GEN AS medico_gen,
         Q_AT_MEDICO_ESP AS medico_esp
        FROM ${tablaDetalle}
-       WHERE C_US = ? AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ? AND V_FORMULARIO = ?
+       WHERE ${CONDICION_DETALLE_C_US} AND N_ANIO = ? AND N_MES = ? AND C_SERVICIO = ? AND V_FORMULARIO = ?
        ORDER BY CAST(C_CONCEPTO AS UNSIGNED)`,
       [identificadorRegistro, anioVal, mesVal, cServicioGet, vFormularioGet]
     );

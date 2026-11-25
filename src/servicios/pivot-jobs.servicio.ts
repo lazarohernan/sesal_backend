@@ -17,6 +17,7 @@ interface PivotJobRecord {
   signature: string;
   payload: PivotQueryPayload;
   logId?: string | null;
+  logReady?: Promise<void>;
   status: PivotJobStatus;
   createdAt: string;
   startedAt?: string;
@@ -119,35 +120,63 @@ const processQueue = () => {
     activeWorkers += 1;
     job.status = "processing";
     job.startedAt = new Date().toISOString();
-    void marcarConsultaPivotProcesando(job.logId ?? null);
+    // Serializar la telemetría sin retrasar el cálculo ni la respuesta.
+    job.logReady = (job.logReady ?? Promise.resolve())
+      .then(() => marcarConsultaPivotProcesando(job.logId ?? null))
+      .catch((error) => { logger.warn("No se pudo marcar inicio del job pivot", error); });
     const startedAt = Date.now();
 
-    void ejecutarConsultaPivot(job.payload)
+    void ejecutarConsultaPivot(job.payload, { maxExecutionTimeMs: 180_000 })
       .then((result) => {
         job.status = "completed";
         job.result = result;
         job.completedAt = new Date().toISOString();
-        return registrarFinConsultaPivot(job.logId ?? null, {
+        const durationMs = Date.now() - startedAt;
+        void job.logReady!.then(() => registrarFinConsultaPivot(job.logId ?? null, {
           status: "completed",
-          durationMs: Date.now() - startedAt,
+          durationMs,
           result
-        });
+        })).catch((error) => { logger.warn("No se pudo registrar fin del job pivot", error); });
       })
       .catch((error) => {
         job.status = "failed";
         job.error = error instanceof Error ? error.message : "Error procesando reporte";
         job.completedAt = new Date().toISOString();
+        const durationMs = Date.now() - startedAt;
         logger.error("Error procesando job pivot", { jobId: job.id, error: job.error });
-        return registrarFinConsultaPivot(job.logId ?? null, {
+        void job.logReady!.then(() => registrarFinConsultaPivot(job.logId ?? null, {
           status: "failed",
-          durationMs: Date.now() - startedAt,
+          durationMs,
           errorMessage: job.error
-        });
+        })).catch((logError) => { logger.warn("No se pudo registrar fallo del job pivot", logError); });
       })
       .finally(() => {
         activeWorkers = Math.max(0, activeWorkers - 1);
         processQueue();
       });
+  }
+};
+
+/**
+ * Descarta resultados de reportes pesados ya calculados.
+ * Sin esto, una corrección en AT2R limpia la caché SQL pero el job
+ * reutiliza el mismo resultado hasta 6 horas.
+ */
+export const invalidarJobsPivot = () => {
+  for (const [jobId, job] of jobs.entries()) {
+    if (job.status === "processing") {
+      continue;
+    }
+    jobs.delete(jobId);
+  }
+
+  signatureToJob.clear();
+
+  for (let indice = queue.length - 1; indice >= 0; indice -= 1) {
+    const jobId = queue[indice];
+    if (!jobId || !jobs.has(jobId)) {
+      queue.splice(indice, 1);
+    }
   }
 };
 
@@ -186,7 +215,7 @@ export const crearPivotJob = (
   jobs.set(job.id, job);
   signatureToJob.set(signature, job.id);
   queue.push(job.id);
-  void registrarInicioConsultaPivot({
+  job.logReady = registrarInicioConsultaPivot({
     payload,
     executionMode: "async",
     requestId: metadata.requestId,
@@ -196,7 +225,7 @@ export const crearPivotJob = (
     if (logId) {
       job.logId = logId;
     }
-  });
+  }).catch((error) => { logger.warn("No se pudo registrar el job pivot", error); });
   processQueue();
 
   return toResponse(job);

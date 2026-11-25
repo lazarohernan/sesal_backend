@@ -6,14 +6,12 @@ import {
   obtenerAniosDisponibles,
   obtenerCatalogoPivot,
   obtenerValoresDimension,
+  resolverAniosConsultaPivot,
   type PivotQueryPayload
 } from "../servicios/pivot.servicio";
 import { crearPivotJob, obtenerPivotJob } from "../servicios/pivot-jobs.servicio";
-import {
-  registrarFinConsultaPivot,
-  registrarInicioConsultaPivot
-} from "../servicios/pivot-analytics.servicio";
 import { AlcanceRegionalError, aplicarFiltroRegionalPivot, obtenerRegionesPermitidasUsuario, resolverRegionesPermitidas, REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
+import { ConsultaAbortadaError } from "../utilidades/mysql-consulta.utilidad";
 import { logger } from "../utilidades/registro.utilidad";
 import { cache } from "../utilidades/cache.utilidad";
 
@@ -105,38 +103,39 @@ export const aniosDisponiblesPivotControlador = async (
   }
 };
 
+const prepararPayloadPivot = async (
+  request: FastifyRequest
+): Promise<PivotQueryPayload> => {
+  const payload = aplicarAlcanceRegionalPayload(request.body as PivotQueryPayload, request);
+  const anios = await resolverAniosConsultaPivot(payload);
+  return { ...payload, years: anios };
+};
+
 export const ejecutarPivotControlador = async (
   request: FastifyRequest,
   reply: FastifyReply
 ) => {
-  const payload = aplicarAlcanceRegionalPayload(request.body as PivotQueryPayload, request);
+  const payload = await prepararPayloadPivot(request);
   const cacheHit = estaConsultaPivotCacheada(payload);
-  const startedAt = Date.now();
-  const logId = cacheHit
-    ? null
-    : await registrarInicioConsultaPivot({
-        payload,
-        executionMode: "sync",
-        requestId: request.id,
-        clientIp: request.ip
-      });
+
+  if (!cacheHit) {
+    const job = crearPivotJob(payload, {
+      requestId: request.id,
+      clientIp: request.ip
+    });
+    return reply.status(202).send(job);
+  }
 
   try {
-    const resultado = await ejecutarConsultaPivot(payload);
-    if (!cacheHit) {
-      await registrarFinConsultaPivot(logId, {
-        status: "completed",
-        durationMs: Date.now() - startedAt,
-        result: resultado
-      });
-    }
+    const resultado = await ejecutarConsultaPivot(payload, { maxExecutionTimeMs: 55_000 });
     return reply.status(200).send({ resultado, generadoEn: new Date().toISOString() });
   } catch (error) {
-    if (!cacheHit) {
-      await registrarFinConsultaPivot(logId, {
-        status: "failed",
-        durationMs: Date.now() - startedAt,
-        errorMessage: error instanceof Error ? error.message : "Error al ejecutar consulta pivot"
+    if (error instanceof ConsultaAbortadaError) {
+      return reply.status(499).send({
+        status: 499,
+        codigo: "SOLICITUD_ABORTADA",
+        mensaje: error.message,
+        requestId: request.id
       });
     }
     if (error instanceof AlcanceRegionalError) {
@@ -155,7 +154,7 @@ export const crearPivotJobControlador = async (
   reply: FastifyReply
 ) => {
   try {
-    const payload = aplicarAlcanceRegionalPayload(request.body as PivotQueryPayload, request);
+    const payload = await prepararPayloadPivot(request);
     const job = crearPivotJob(payload, {
       requestId: request.id,
       clientIp: request.ip

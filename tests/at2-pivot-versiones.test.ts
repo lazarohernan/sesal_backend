@@ -26,10 +26,10 @@ const consultarConceptos = (anio: number, dimension: "CONCEPTO" | "CONCEPTO_ORDE
       100
     );
     assert.equal(catalogoNuevo.length, 92);
-    assert.equal(catalogoNuevo.find((fila) => String(fila.valor) === "82")?.etiqueta, "Garífuna");
+    assert.equal(catalogoNuevo.find((fila) => String(fila.valor) === "82")?.etiqueta, "Maya Chortí");
     assert.equal(
       catalogoNuevo.find((fila) => String(fila.valor) === "92")?.etiqueta,
-      "No Sabe / Ninguno"
+      "No sabe / Ninguno"
     );
 
     const historico2025 = await consultarConceptos(2025, "CONCEPTO");

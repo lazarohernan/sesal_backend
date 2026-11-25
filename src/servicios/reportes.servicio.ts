@@ -5,7 +5,7 @@ import {
   construirFuenteDetalleAt2,
   construirFuenteDetalleAt2TodosLosAnios
 } from "./at2-detalle-fuente.servicio";
-import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
+import { AlcanceRegionalError, REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
 import { seguimientoServicio, type EstadoSeguimiento } from "./seguimiento.servicio";
 import { CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS } from "../utilidades/at2-reglas.util";
 import { construirCatalogoAt2NuevoSql } from "../utilidades/at2-catalogo.util";
@@ -45,6 +45,8 @@ export interface ResumenMaestroAt2Resultado {
   mesInicio: number;
   mesFin: number;
   versionFormulario: "1" | "2";
+  establecimientoRups?: string | null;
+  establecimientoNombre?: string | null;
   filas: ResumenMaestroAt2Fila[];
 }
 
@@ -74,6 +76,11 @@ const normalizarNivelReporte = (regionIds?: number[] | null) => {
 const construirRegionKey = (regionIds?: number[] | null) =>
   regionIds?.length ? [...regionIds].sort((a, b) => a - b).join(",") : "central";
 
+const limpiarTextoReporte = (valor: unknown, respaldo = "") =>
+  String(valor ?? respaldo)
+    .trim()
+    .replace(/^["“”]+|["“”]+$/g, "");
+
 const condicionRegiones = (regionIds?: number[] | null, alias = "us") => {
   if (!regionIds?.length) return { sql: "", params: [] as number[] };
   return {
@@ -82,10 +89,90 @@ const condicionRegiones = (regionIds?: number[] | null, alias = "us") => {
   };
 };
 
-const limpiarTextoReporte = (valor: unknown, respaldo = "") =>
-  String(valor ?? respaldo)
-    .trim()
-    .replace(/^["“”]+|["“”]+$/g, "");
+const condicionEstablecimiento = (rups?: string | null) => {
+  if (!rups) return { sql: "", params: [] as string[] };
+  return {
+    sql: "AND CAST(det.C_US AS UNSIGNED) = CAST(? AS UNSIGNED)",
+    params: [rups]
+  };
+};
+
+const construirEtiquetaEstablecimiento = (params: {
+  nombre: string;
+  rups: string;
+  nivel?: string | null;
+  municipio?: string | null;
+}) => {
+  const partes = [`${params.nombre} (RUPS: ${params.rups})`];
+  const nivel = params.nivel?.trim();
+  const municipio = params.municipio?.trim();
+  if (nivel) partes.push(nivel);
+  if (municipio) partes.push(municipio);
+  return partes.join(" - ");
+};
+
+const resolverEstablecimientoResumenMaestro = async (
+  rups: string,
+  regionIds?: number[] | null
+) => {
+  const pool = obtenerPoolActual();
+  const filtroRegion = condicionRegiones(regionIds);
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `
+      SELECT
+        CAST(us.C_US AS CHAR) AS rups,
+        TRIM(CAST(COALESCE(cat.nombre, us.D_US, us.C_US) AS CHAR)) AS nombre,
+        TRIM(CAST(nivel.D_NIVEL_US AS CHAR)) AS nivel,
+        TRIM(CAST(muni.D_MUNICIPIO AS CHAR)) AS municipio
+      FROM BAS_BDR_US us
+      LEFT JOIN cat_establecimientos cat
+        ON cat.codigo COLLATE utf8mb4_unicode_ci = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+      LEFT JOIN BAS_BDR_NIVELES_US nivel
+        ON nivel.C_NIVEL_US = us.C_NIVEL_US
+      LEFT JOIN BAS_BDR_MUNICIPIOS muni
+        ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
+       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
+      WHERE us.C_US = CAST(? AS UNSIGNED)
+        ${filtroRegion.sql}
+      LIMIT 1
+    `,
+    [rups, ...filtroRegion.params]
+  );
+
+  const registro = rows[0];
+  if (registro) {
+    const nombre = limpiarTextoReporte(registro.nombre, rups);
+    const codigo = limpiarTextoReporte(registro.rups, rups);
+    return {
+      rups: codigo,
+      nombre,
+      etiqueta: construirEtiquetaEstablecimiento({
+        nombre,
+        rups: codigo,
+        nivel: limpiarTextoReporte(registro.nivel),
+        municipio: limpiarTextoReporte(registro.municipio)
+      })
+    };
+  }
+
+  const [existencia] = await pool.query<RowDataPacket[]>(
+    `SELECT C_US FROM BAS_BDR_US WHERE C_US = CAST(? AS UNSIGNED) LIMIT 1`,
+    [rups]
+  );
+  if (!existencia[0]) {
+    throw new AlcanceRegionalError(
+      "El código RUPS indicado no existe en el catálogo de establecimientos.",
+      400,
+      "ESTABLECIMIENTO_INVALIDO"
+    );
+  }
+
+  throw new AlcanceRegionalError(
+    "El establecimiento indicado no pertenece a la región seleccionada o autorizada.",
+    403,
+    "ESTABLECIMIENTO_NO_AUTORIZADO"
+  );
+};
 
 export const obtenerIndicadoresMunicipales = async (
   params: IndicadoresMunicipalesParams
@@ -153,14 +240,19 @@ export const obtenerResumenMaestroAt2 = async (params: {
   mesInicio: number;
   mesFin: number;
   regionIds?: number[] | null;
+  rups?: string | null;
 }): Promise<ResumenMaestroAt2Resultado> => {
-  const { anio, mesInicio, mesFin, regionIds } = params;
-  const cacheKey = `reportes:resumen-maestro-at2:${anio}:${mesInicio}-${mesFin}:${construirRegionKey(regionIds)}`;
+  const { anio, mesInicio, mesFin, regionIds, rups } = params;
+  const establecimiento = rups
+    ? await resolverEstablecimientoResumenMaestro(rups, regionIds)
+    : null;
+  const cacheKey = `reportes:resumen-maestro-at2:${anio}:${mesInicio}-${mesFin}:${construirRegionKey(regionIds)}:${establecimiento?.rups ?? "todos"}`;
 
   return cache.getOrSet(cacheKey, async () => {
   const pool = obtenerPoolActual();
   const fuenteDetalle = construirFuenteDetalleAt2([anio]);
   const filtroRegion = condicionRegiones(regionIds);
+  const filtroEstablecimiento = condicionEstablecimiento(establecimiento?.rups);
   const [versionesRows] = await pool.query<RowDataPacket[]>(
     `SELECT DISTINCT det.V_FORMULARIO
        FROM ${fuenteDetalle}
@@ -168,8 +260,9 @@ export const obtenerResumenMaestroAt2 = async (params: {
          ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci
       WHERE det.N_ANIO = ?
         AND det.N_MES BETWEEN ? AND ?
-        ${filtroRegion.sql}`,
-    [anio, mesInicio, mesFin, ...filtroRegion.params]
+        ${filtroRegion.sql}
+        ${filtroEstablecimiento.sql}`,
+    [anio, mesInicio, mesFin, ...filtroRegion.params, ...filtroEstablecimiento.params]
   );
   const versionesPresentes = new Set(
     versionesRows.map((fila) => String(fila.V_FORMULARIO ?? ""))
@@ -222,11 +315,12 @@ export const obtenerResumenMaestroAt2 = async (params: {
           AND det.N_MES BETWEEN ? AND ?
           AND CAST(TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) AS UNSIGNED) BETWEEN 1 AND ?
           ${filtroRegion.sql}
+          ${filtroEstablecimiento.sql}
         GROUP BY CAST(TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) AS UNSIGNED)
       ) agg ON agg.numero = conceptos.numero
       ORDER BY conceptos.numero
     `,
-    [maxConcepto, anio, mesInicio, mesFin, maxConcepto, ...filtroRegion.params]
+    [maxConcepto, anio, mesInicio, mesFin, maxConcepto, ...filtroRegion.params, ...filtroEstablecimiento.params]
   );
 
   const filasConsultadas = rows.map((row) => {
@@ -259,11 +353,13 @@ export const obtenerResumenMaestroAt2 = async (params: {
   });
 
   return {
-    nivel: normalizarNivelReporte(regionIds),
+    nivel: establecimiento?.etiqueta ?? normalizarNivelReporte(regionIds),
     anio,
     mesInicio,
     mesFin,
     versionFormulario,
+    establecimientoRups: establecimiento?.rups ?? null,
+    establecimientoNombre: establecimiento?.nombre ?? null,
     filas
   };
   }, CACHE_TTL.REPORTES_OFICIALES);

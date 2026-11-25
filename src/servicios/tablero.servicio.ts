@@ -7,6 +7,7 @@ import {
   construirFuenteDetalleAt2TodosLosAnios
 } from "./at2-detalle-fuente.servicio";
 import { CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS } from "../utilidades/at2-reglas.util";
+import { JOIN_DETALLE_US_INNER } from "../utilidades/sql-joins.util";
 
 const TABLA_GLOBAL_ANIO_RESUMEN = "tablero_global_anio_resumen";
 const TABLA_REGION_ANIO_RESUMEN = "tablero_region_anio_resumen";
@@ -84,10 +85,7 @@ const obtenerTotalesAtencionesConcepto19 = async (
   }
 
   if (regionIds?.length || departamentoId) {
-    joins.push(
-      `INNER JOIN BAS_BDR_US us
-         ON us.C_US COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci`
-    );
+    joins.push(JOIN_DETALLE_US_INNER);
   }
 
   if (regionIds?.length) {
@@ -278,7 +276,7 @@ const obtenerMapaRegionalDesdeResumen = async (regionIds: number[]): Promise<Dep
         COUNT(DISTINCT det.C_US) AS totalUnidades
       FROM ${fuenteDetalle}
       INNER JOIN BAS_BDR_US us
-        ON us.C_US COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci
+        ON us.C_US = CAST(det.C_US AS UNSIGNED)
       INNER JOIN BAS_BDR_DEPARTAMENTOS dep
         ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO
       WHERE det.C_CONCEPTO = ? AND us.C_REGION IN (${placeholders})
@@ -312,7 +310,7 @@ const obtenerMapaGlobalDesdeDetalle = async (): Promise<DepartamentoDato[]> => {
         COUNT(DISTINCT det.C_US) AS totalUnidades
       FROM ${fuenteDetalle}
       INNER JOIN BAS_BDR_US us
-        ON us.C_US COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci
+        ON us.C_US = CAST(det.C_US AS UNSIGNED)
       INNER JOIN BAS_BDR_DEPARTAMENTOS dep
         ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO
       WHERE det.C_CONCEPTO = ?
@@ -378,7 +376,7 @@ export const obtenerResumenTablero = async (
                 COUNT(DISTINCT det.C_US) AS totalUnidades
 	               FROM ${fuenteDetalle}
 	               INNER JOIN BAS_BDR_US us
-                 ON us.C_US COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci
+                 ON us.C_US = CAST(det.C_US AS UNSIGNED)
                WHERE det.N_ANIO = ?${filtroRegiones.clause}`,
               [anio, ...filtroRegiones.values]
             );
@@ -390,7 +388,7 @@ export const obtenerResumenTablero = async (
               `SELECT COUNT(*) AS total
 	               FROM ${fuenteDetalle}
 	               INNER JOIN BAS_BDR_US us
-                 ON us.C_US COLLATE utf8mb4_unicode_ci = det.C_US COLLATE utf8mb4_unicode_ci
+                 ON us.C_US = CAST(det.C_US AS UNSIGNED)
                WHERE 1=1${filtroRegiones.clause}`,
               [...filtroRegiones.values]
             );
