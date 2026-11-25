@@ -1,5 +1,9 @@
 import type { RowDataPacket, ResultSetHeader } from "mysql2/promise";
 import { obtenerPoolActual } from "../base_datos/pool";
+import {
+  establecimientoAtributosServicio,
+  type AtributosEstablecimiento
+} from "./establecimiento-atributos.servicio";
 
 export interface Establecimiento {
   id: number;
@@ -12,6 +16,11 @@ export interface Establecimiento {
   regionNombre: string;
   municipioCodigo: number;
   municipioNombre: string;
+  /** Población asignada (null si no se ha cargado). */
+  poblacion: number | null;
+  /** Exento de reportar AT2R: no cuenta en el total esperado del seguimiento. */
+  exentoReporte: boolean;
+  motivoExencion: string | null;
 }
 
 export interface NivelEstablecimiento {
@@ -70,7 +79,10 @@ interface MunicipioRow extends RowDataPacket {
   D_MUNICIPIO: string;
 }
 
-const mapearEstablecimiento = (row: EstablecimientoRow): Establecimiento => ({
+const mapearEstablecimiento = (
+  row: EstablecimientoRow,
+  atributos?: AtributosEstablecimiento
+): Establecimiento => ({
   id: row.C_US,
   codigoRup: String(row.C_US),
   nombre: row.D_US,
@@ -81,6 +93,9 @@ const mapearEstablecimiento = (row: EstablecimientoRow): Establecimiento => ({
   regionNombre: row.D_REGION ?? "Sin región",
   municipioCodigo: row.C_MUNICIPIO,
   municipioNombre: row.D_MUNICIPIO ?? "Sin municipio",
+  poblacion: atributos?.poblacion ?? null,
+  exentoReporte: atributos?.exentoReporte ?? false,
+  motivoExencion: atributos?.motivoExencion ?? null,
 });
 
 const BASE_QUERY = `
@@ -107,7 +122,8 @@ export const establecimientosServicio = {
     const [rows] = await pool.query<EstablecimientoRow[]>(
       `${BASE_QUERY} ORDER BY u.D_US ASC`
     );
-    return rows.map(mapearEstablecimiento);
+    const atributos = await establecimientoAtributosServicio.listar();
+    return rows.map((row) => mapearEstablecimiento(row, atributos.get(String(row.C_US))));
   },
 
   async obtenerPorId(id: number): Promise<Establecimiento | null> {
@@ -116,7 +132,9 @@ export const establecimientosServicio = {
       `${BASE_QUERY} WHERE u.C_US = ? LIMIT 1`,
       [id]
     );
-    return rows[0] ? mapearEstablecimiento(rows[0]) : null;
+    if (!rows[0]) return null;
+    const atributos = await establecimientoAtributosServicio.listar();
+    return mapearEstablecimiento(rows[0], atributos.get(String(rows[0].C_US)));
   },
 
   async listarNiveles(): Promise<NivelEstablecimiento[]> {

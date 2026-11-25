@@ -212,6 +212,59 @@ const CONCEPTO_DESCRIPCION_SQL = `
   END
 `;
 
+/** Número de concepto sin ceros a la izquierda (orden numérico: 1, 2, … 10). */
+const CONCEPTO_NUMERO_SQL = "CAST(TRIM(LEADING '0' FROM TRIM(det.C_CONCEPTO)) AS UNSIGNED)";
+
+/**
+ * Versiones del formulario AT2. La 4 (AT2-R-2026) y la 1 no están en
+ * cat_formularios, así que la etiqueta se resuelve aquí.
+ */
+const FORMULARIO_VERSIONES = [
+  { valor: "1", etiqueta: "AT2 (45 casillas)" },
+  { valor: "2", etiqueta: "AT2-R (51 casillas)" },
+  { valor: "3", etiqueta: "AT2-R-2012 (52 casillas)" },
+  { valor: "4", etiqueta: "AT2-R-2026 (92 casillas)" }
+];
+const FORMULARIO_ETIQUETA_SQL = `CASE TRIM(det.V_FORMULARIO)
+${FORMULARIO_VERSIONES.map((v) => `    WHEN '${v.valor}' THEN '${v.etiqueta}'`).join("\n")}
+    ELSE CONCAT('Versión ', det.V_FORMULARIO)
+  END`;
+
+/**
+ * Bloques del formulario. Hasta 2025 vienen de AT2_BDR_CONCEPTOS_GE; el
+ * formulario 2026 (versión 4) no está en ese catálogo y se agrupa por las
+ * secciones del formulario según el número de concepto.
+ */
+const BLOQUES_FORMULARIO = [
+  { valor: "1", etiqueta: "Atención en Grupo de Edad" },
+  { valor: "4", etiqueta: "Datos Generales" },
+  { valor: "3", etiqueta: "Atención Integral al Niño" },
+  { valor: "2", etiqueta: "Atención Integral a la Mujer" },
+  { valor: "5", etiqueta: "Planificación Familiar" },
+  { valor: "6", etiqueta: "Atención Materna" },
+  { valor: "7", etiqueta: "Otras Atenciones" },
+  { valor: "8", etiqueta: "Etnias" },
+  { valor: "0", etiqueta: "[Ninguno]" }
+];
+const BLOQUE_CODIGO_SQL = `CASE
+    WHEN TRIM(det.V_FORMULARIO) = '4' THEN CASE
+      WHEN ${CONCEPTO_NUMERO_SQL} BETWEEN 1 AND 19 THEN '1'
+      WHEN ${CONCEPTO_NUMERO_SQL} BETWEEN 20 AND 23 THEN '4'
+      WHEN ${CONCEPTO_NUMERO_SQL} BETWEEN 24 AND 40 THEN '3'
+      WHEN ${CONCEPTO_NUMERO_SQL} BETWEEN 41 AND 56 THEN '5'
+      WHEN ${CONCEPTO_NUMERO_SQL} BETWEEN 57 AND 64 THEN '6'
+      WHEN ${CONCEPTO_NUMERO_SQL} BETWEEN 65 AND 81 THEN '7'
+      WHEN ${CONCEPTO_NUMERO_SQL} BETWEEN 82 AND 92 THEN '8'
+      ELSE '0'
+    END
+    ELSE COALESCE(NULLIF(TRIM(concepto_ge.C_FORM_BLOQUE), ''), '0')
+  END`;
+const BLOQUE_ETIQUETA_SQL = `CASE ${BLOQUE_CODIGO_SQL}
+${BLOQUES_FORMULARIO.map((b) => `    WHEN '${b.valor}' THEN '${b.etiqueta}'`).join("\n")}
+    ELSE '[Ninguno]'
+  END`;
+const BLOQUE_ORDEN_SQL = `FIELD(${BLOQUE_CODIGO_SQL}, ${BLOQUES_FORMULARIO.map((b) => `'${b.valor}'`).join(", ")})`;
+
 const NIVEL_OPERATIVO_CODIGO_SQL = `
   CASE
     WHEN us.C_NIVEL_US IN (1, 2, 3) THEN '002'
@@ -302,7 +355,8 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     groupBy: CONCEPTO_DESCRIPCION_SQL,
     valueExpr: "det.C_CONCEPTO",
     joins: ["cat_concepto", "cat_concepto_ordenado", "concepto_ge", "concepto_ge_codigo"],
-    orderBy: CONCEPTO_DESCRIPCION_SQL,
+    // Orden numérico del formulario (1, 2, 3…), no alfabético.
+    orderBy: `MIN(${CONCEPTO_NUMERO_SQL}), ${CONCEPTO_DESCRIPCION_SQL}`,
     catalog: {
       table: "cat_conceptos",
       valueColumn: "codigo",
@@ -351,7 +405,8 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     groupBy: `${RUPS_VISIBLE_SQL}, cat_establecimiento.nombre, us.D_US, niveles_us.D_NIVEL_US, municipios.D_MUNICIPIO`,
     valueExpr: RUPS_VISIBLE_SQL,
     joins: ["us", "cat_establecimiento", "niveles_us", "municipios"],
-    orderBy: `COALESCE(cat_establecimiento.nombre, us.D_US, ${RUPS_VISIBLE_SQL})`,
+    // Código de departamento, luego de municipio y luego RUPS.
+    orderBy: `MIN(us.C_DEPARTAMENTO), MIN(us.C_MUNICIPIO), MIN(CAST(${RUPS_VISIBLE_SQL} AS UNSIGNED))`,
     catalog: {
       table: "cat_establecimientos",
       valueColumn: "codigo",
@@ -388,12 +443,12 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     groupBy: "us.C_DEPARTAMENTO, deptos.D_DEPARTAMENTO",
     valueExpr: "us.C_DEPARTAMENTO",
     joins: ["us", "deptos"],
-    orderBy: "deptos.D_DEPARTAMENTO",
+    orderBy: "us.C_DEPARTAMENTO",
     catalog: {
       table: "BAS_BDR_DEPARTAMENTOS",
       valueColumn: "C_DEPARTAMENTO",
       labelColumn: "D_DEPARTAMENTO",
-      orderBy: "D_DEPARTAMENTO",
+      orderBy: "C_DEPARTAMENTO",
       preload: false,
       defaultLimit: 30
     }
@@ -414,7 +469,7 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     groupBy: "us.C_DEPARTAMENTO, us.C_MUNICIPIO, deptos.D_DEPARTAMENTO, municipios.D_MUNICIPIO",
     valueExpr: "CONCAT(us.C_DEPARTAMENTO, '-', us.C_MUNICIPIO)",
     joins: ["us", "deptos", "municipios"],
-    orderBy: "deptos.D_DEPARTAMENTO, municipios.D_MUNICIPIO",
+    orderBy: "us.C_DEPARTAMENTO, us.C_MUNICIPIO",
     catalog: {
       table: "BAS_BDR_MUNICIPIOS",
       valueColumn: "CONCAT(C_DEPARTAMENTO, '-', C_MUNICIPIO)",
@@ -426,7 +481,7 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
   },
   NIVEL_ESTABLECIMIENTO: {
     id: "NIVEL_ESTABLECIMIENTO",
-    label: "Nivel de Establecimiento de Salud",
+    label: "Tipo de ES",
     alias: "nivel_establecimiento",
     type: "string",
     select: NIVEL_ESTABLECIMIENTO_ETIQUETA_SQL,
@@ -465,16 +520,16 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Formulario",
     alias: "formulario",
     type: "string",
-    select: "COALESCE(cat_formularios.descripcion, det.V_FORMULARIO)",
-    groupBy: "COALESCE(cat_formularios.descripcion, det.V_FORMULARIO)",
-    valueExpr: "det.V_FORMULARIO",
-    joins: ["cat_formularios"],
-    orderBy: "COALESCE(cat_formularios.descripcion, det.V_FORMULARIO)",
+    select: FORMULARIO_ETIQUETA_SQL,
+    // Cada versión tiene una etiqueta única: agrupar por la etiqueta cumple ONLY_FULL_GROUP_BY.
+    groupBy: FORMULARIO_ETIQUETA_SQL,
+    valueExpr: "TRIM(det.V_FORMULARIO)",
+    orderBy: "MIN(TRIM(det.V_FORMULARIO))",
     catalog: {
-      table: "cat_formularios",
-      valueColumn: "codigo",
-      labelColumn: "descripcion",
-      orderBy: "codigo",
+      table: `(${FORMULARIO_VERSIONES.map((v) => `SELECT '${v.valor}' AS valor, '${v.etiqueta}' AS etiqueta`).join(" UNION ALL ")}) formularios`,
+      valueColumn: "valor",
+      labelColumn: "etiqueta",
+      orderBy: "valor",
       preload: true
     }
   },
@@ -483,27 +538,16 @@ const DIMENSIONES: Record<string, DimensionDefinition> = {
     label: "Bloque",
     alias: "bloque",
     type: "string",
-    select: `CASE concepto_ge.C_FORM_BLOQUE 
-               WHEN '1' THEN 'Atención en Grupo de Edad'
-               WHEN '2' THEN 'Atención Integral a la Mujer'
-               WHEN '3' THEN 'Atención Integral al Niño'
-               WHEN '4' THEN 'Datos Generales'
-               WHEN '0' THEN '[Ninguno]'
-               WHEN NULL THEN '[Ninguno]'
-               ELSE '[Ninguno]'
-             END`,
-    groupBy: "concepto_ge.C_FORM_BLOQUE",
-    valueExpr: "concepto_ge.C_FORM_BLOQUE",
+    select: BLOQUE_ETIQUETA_SQL,
+    groupBy: BLOQUE_ETIQUETA_SQL,
+    valueExpr: BLOQUE_CODIGO_SQL,
     joins: ["concepto_ge"],
-    orderBy: "concepto_ge.C_FORM_BLOQUE",
+    orderBy: `MIN(${BLOQUE_ORDEN_SQL})`,
     catalog: {
-      table: "(SELECT '1' AS valor, 'Atención en Grupo de Edad' AS etiqueta UNION ALL " +
-             "SELECT '2' AS valor, 'Atención Integral a la Mujer' AS etiqueta UNION ALL " +
-             "SELECT '3' AS valor, 'Atención Integral al Niño' AS etiqueta UNION ALL " +
-             "SELECT '4' AS valor, 'Datos Generales' AS etiqueta UNION ALL " +
-             "SELECT '0' AS valor, '[Ninguno]' AS etiqueta) bloques",
+      table: `(${BLOQUES_FORMULARIO.map((b) => `SELECT '${b.valor}' AS valor, '${b.etiqueta}' AS etiqueta`).join(" UNION ALL ")}) bloques`,
       valueColumn: "valor",
       labelColumn: "etiqueta",
+      orderBy: `FIELD(valor, ${BLOQUES_FORMULARIO.map((b) => `'${b.valor}'`).join(", ")})`,
       preload: true
     }
   },
@@ -1921,6 +1965,75 @@ LIMIT ${limit}`;
   };
 }
 
+const DIMENSIONES_CONCEPTO = new Set(["CONCEPTO", "CONCEPTO_ORDENADO"]);
+
+/**
+ * Si el usuario filtró conceptos específicos y el concepto es la única
+ * dimensión de filas, agrega en 0 los conceptos que no tuvieron registros
+ * (antes desaparecían) y deja todo en orden numérico.
+ *
+ * Solo aplica cuando todos los años consultados usan el mismo formulario
+ * (2026+ o anteriores), porque el mismo número de concepto significa cosas
+ * distintas en cada versión.
+ */
+export const completarConceptosSeleccionados = (
+  resultado: PivotQueryResult,
+  payload: PivotQueryPayload,
+  metadata: Map<string, ConceptoOrdenadoMetadata>
+): PivotQueryResult => {
+  const filas = payload.rows ?? [];
+  if (filas.length !== 1 || !DIMENSIONES_CONCEPTO.has(filas[0])) return resultado;
+  const dimensionConcepto = filas[0];
+
+  const codigosSeleccionados = (payload.filters ?? [])
+    .filter((filtro) => DIMENSIONES_CONCEPTO.has(filtro.field))
+    .flatMap((filtro) => filtro.values ?? [])
+    .map((valor) => normalizarCodigoConceptoSinCeros(valor))
+    .filter((valor) => /^\d+$/.test(valor));
+  if (!codigosSeleccionados.length) return resultado;
+
+  const anios = resultado.aniosConsultados;
+  if (!anios.length) return resultado;
+  const todosNuevos = anios.every((anio) => anio >= 2026);
+  const todosHistoricos = anios.every((anio) => anio < 2026);
+  if (!todosNuevos && !todosHistoricos) return resultado;
+  const version = todosNuevos ? "4" : "3";
+
+  const etiquetaDe = (codigo: string) =>
+    buscarMetadataConcepto(metadata, codigo, version)?.label ?? construirEtiquetaConceptoFallback(codigo);
+  const ordenPorEtiqueta = new Map<string, number>();
+  [...new Set(codigosSeleccionados)].forEach((codigo) => {
+    const etiqueta = etiquetaDe(codigo);
+    if (!ordenPorEtiqueta.has(etiqueta)) ordenPorEtiqueta.set(etiqueta, Number(codigo));
+  });
+
+  const datos = [...resultado.datos];
+  const presentes = new Set(datos.map((fila) => String(fila[dimensionConcepto] ?? "")));
+  const plantilla = datos[0] ?? resultado.totalGeneral ?? {};
+  const clavesValor = Object.keys(plantilla).filter(
+    (clave) => clave !== dimensionConcepto && clave !== "MUNICIPIO_CODIGO"
+  );
+
+  ordenPorEtiqueta.forEach((_, etiqueta) => {
+    if (presentes.has(etiqueta)) return;
+    const fila: Record<string, unknown> = { [dimensionConcepto]: etiqueta };
+    clavesValor.forEach((clave) => {
+      fila[clave] = 0;
+    });
+    datos.push(fila);
+  });
+
+  const posicionOriginal = new Map(datos.map((fila, indice) => [fila, indice]));
+  datos.sort((a, b) => {
+    const ordenA = ordenPorEtiqueta.get(String(a[dimensionConcepto] ?? "")) ?? Number.MAX_SAFE_INTEGER;
+    const ordenB = ordenPorEtiqueta.get(String(b[dimensionConcepto] ?? "")) ?? Number.MAX_SAFE_INTEGER;
+    if (ordenA !== ordenB) return ordenA - ordenB;
+    return (posicionOriginal.get(a) ?? 0) - (posicionOriginal.get(b) ?? 0);
+  });
+
+  return { ...resultado, datos };
+};
+
 // Genera una clave de caché única para una consulta pivot
 const generarClaveCachePivot = (payload: PivotQueryPayload): string => {
   // Usar years si está definido, sino year, sino 'all'
@@ -1973,7 +2086,11 @@ export async function ejecutarConsultaPivot(
     async () => {
       const resultadoConceptoOrdenado = await ejecutarConsultaConceptoOrdenadoOptimizada(payload, opcionesSql);
       if (resultadoConceptoOrdenado) {
-        return resultadoConceptoOrdenado;
+        return completarConceptosSeleccionados(
+          resultadoConceptoOrdenado,
+          payload,
+          await obtenerMetadataConceptoOrdenado()
+        );
       }
 
       const filas = payload.rows ?? [];
@@ -2151,7 +2268,7 @@ export async function ejecutarConsultaPivot(
         ? construirTotalGeneralPivotado(cabecerasPivotadas, totalesPivotados)
         : totalGeneral;
 
-      return {
+      const resultadoFinal: PivotQueryResult = {
         datos: limpiarFilasSalida(aplicarJerarquiaTerritorialSalida(datosTransformados, filas)),
         totalGeneral: totalGeneralFinal ? limpiarFilaSalida(totalGeneralFinal) : null,
         aniosConsultados: aniosConsulta,
@@ -2162,6 +2279,11 @@ export async function ejecutarConsultaPivot(
           medidasSeleccionadas: valoresSolicitud.map((valor) => valor.field)
         }
       };
+      return completarConceptosSeleccionados(
+        resultadoFinal,
+        payload,
+        await obtenerMetadataConceptoOrdenado()
+      );
     },
     CACHE_TTL.CONSULTA_PIVOT
   );

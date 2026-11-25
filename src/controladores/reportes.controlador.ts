@@ -22,7 +22,8 @@ export const obtenerIndicadoresMunicipalesControlador = async (
     reply.header("Cache-Control", "private, no-store");
     reply.header("Vary", "Cookie, Authorization");
 
-    const { anio, departamentoId, limite, regionId } = request.query as Record<string, string | undefined>;
+    const { anio, departamentoId, limite, regionId, nivel } = request.query as Record<string, string | undefined>;
+    const nivelAtencion = nivel === "001" || nivel === "002" ? nivel : undefined;
 
     const anioNumero = anio ? Number(anio) : undefined;
     const departamentoNumero = Number(departamentoId);
@@ -60,7 +61,8 @@ export const obtenerIndicadoresMunicipalesControlador = async (
       anio: anioNumero,
       departamentoId: departamentoNumero,
       limite: limiteSeguro,
-      regionIds: regionesPermitidas ?? undefined
+      regionIds: regionesPermitidas ?? undefined,
+      nivel: nivelAtencion
     });
 
     return reply.status(200).send({
@@ -104,7 +106,8 @@ export const obtenerResumenMaestroAt2Controlador = async (
     reply.header("Cache-Control", "private, no-store");
     reply.header("Vary", "Cookie, Authorization");
 
-    const { anio, mesInicio, mesFin, regionId, rups } = request.query as Record<string, string | undefined>;
+    const { anio, mesInicio, mesFin, regionId, rups, municipio } = request.query as Record<string, string | undefined>;
+    const municipioLimpio = municipio?.trim() ? municipio.trim() : undefined;
     const anioNumero = sanitizarEntero(anio, 2008, 2099);
     const mesInicioNumero = sanitizarEntero(mesInicio ?? "1", 1, 12);
     const mesFinNumero = sanitizarEntero(mesFin ?? "12", 1, 12);
@@ -125,6 +128,13 @@ export const obtenerResumenMaestroAt2Controlador = async (
       });
     }
 
+    if (municipioLimpio && !/^\d{1,2}-\d{1,3}$/.test(municipioLimpio)) {
+      return reply.status(400).send({
+        codigo: "PARAMETRO_INVALIDO",
+        mensaje: "El municipio debe tener el formato departamento-municipio."
+      });
+    }
+
     if (mesInicioNumero > mesFinNumero) {
       return reply.status(400).send({
         codigo: "RANGO_MESES_INVALIDO",
@@ -138,7 +148,8 @@ export const obtenerResumenMaestroAt2Controlador = async (
       mesInicio: mesInicioNumero,
       mesFin: mesFinNumero,
       regionIds: regionesPermitidas,
-      rups: rupsLimpio
+      rups: rupsLimpio,
+      municipio: municipioLimpio
     });
 
     return reply.status(200).send({

@@ -1,5 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { establecimientosServicio } from "../servicios/establecimientos.servicio";
+import { establecimientoAtributosServicio } from "../servicios/establecimiento-atributos.servicio";
+import { cache } from "../utilidades/cache.utilidad";
 import { logger } from "../utilidades/registro.utilidad";
 
 const responderError = (reply: FastifyReply, status: number, codigo: string, mensaje: string) =>
@@ -119,6 +121,93 @@ export const actualizarEstablecimientoControlador = async (
     return reply.send({ ok: true, mensaje: "Establecimiento actualizado correctamente.", establecimiento });
   } catch (error) {
     logger.error("Error al actualizar establecimiento", error);
+    throw error;
+  }
+};
+
+const nombreUsuario = (request: FastifyRequest) =>
+  request.usuarioActual?.nombreMostrar || request.usuarioActual?.username || "desconocido";
+
+/** El seguimiento y el control de envíos dependen de quién está exento. */
+const invalidarCacheSeguimiento = () => {
+  cache.deleteByPrefix("reportes:control-envios-at2");
+};
+
+const leerPoblacion = (valor: unknown): number | null | undefined => {
+  if (valor === undefined) return undefined;
+  if (valor === null || valor === "") return null;
+  const numero = Number(valor);
+  return Number.isInteger(numero) && numero >= 0 && numero <= 50_000_000 ? numero : undefined;
+};
+
+// PATCH /api/establecimientos/:id/atributos
+export const actualizarAtributosControlador = async (
+  request: FastifyRequest<{
+    Params: { id?: string };
+    Body: { poblacion?: unknown; exentoReporte?: unknown; motivoExencion?: unknown };
+  }>,
+  reply: FastifyReply
+) => {
+  const id = Number(request.params.id);
+  if (!id) return responderError(reply, 400, "ID_INVALIDO", "ID de establecimiento inválido.");
+
+  const { poblacion, exentoReporte, motivoExencion } = request.body ?? {};
+  const poblacionValida = leerPoblacion(poblacion);
+  if (poblacion !== undefined && poblacionValida === undefined) {
+    return responderError(reply, 400, "POBLACION_INVALIDA", "La población debe ser un número entero positivo.");
+  }
+  if (exentoReporte !== undefined && typeof exentoReporte !== "boolean") {
+    return responderError(reply, 400, "EXENTO_INVALIDO", "exentoReporte debe ser verdadero o falso.");
+  }
+
+  try {
+    const existente = await establecimientosServicio.obtenerPorId(id);
+    if (!existente) return responderError(reply, 404, "NO_ENCONTRADO", "Establecimiento no encontrado.");
+
+    await establecimientoAtributosServicio.guardar({
+      rups: existente.codigoRup,
+      poblacion: poblacionValida,
+      exentoReporte: exentoReporte as boolean | undefined,
+      motivoExencion: motivoExencion === undefined ? undefined : String(motivoExencion ?? ""),
+      actualizadoPor: nombreUsuario(request)
+    });
+    if (exentoReporte !== undefined) invalidarCacheSeguimiento();
+
+    const establecimiento = await establecimientosServicio.obtenerPorId(id);
+    return reply.send({ ok: true, mensaje: "Datos del establecimiento actualizados.", establecimiento });
+  } catch (error) {
+    logger.error("Error al actualizar atributos del establecimiento", error);
+    throw error;
+  }
+};
+
+// POST /api/establecimientos/poblacion  { filas: [{ rups, poblacion }] }
+export const cargarPoblacionControlador = async (
+  request: FastifyRequest<{ Body: { filas?: unknown } }>,
+  reply: FastifyReply
+) => {
+  const filas = request.body?.filas;
+  if (!Array.isArray(filas) || filas.length === 0 || filas.length > 10_000) {
+    return responderError(reply, 400, "FILAS_INVALIDAS", "Envíe entre 1 y 10,000 filas con RUPS y población.");
+  }
+
+  const validas: Array<{ rups: string; poblacion: number }> = [];
+  const invalidas: number[] = [];
+  filas.forEach((fila, indice) => {
+    const rups = String((fila as { rups?: unknown })?.rups ?? "").trim().replace(/^0+(?=\d)/, "");
+    const poblacion = leerPoblacion((fila as { poblacion?: unknown })?.poblacion);
+    if (/^\d+$/.test(rups) && typeof poblacion === "number") {
+      validas.push({ rups, poblacion });
+    } else {
+      invalidas.push(indice + 1);
+    }
+  });
+
+  try {
+    const resultado = await establecimientoAtributosServicio.cargarPoblacion(validas, nombreUsuario(request));
+    return reply.send({ ok: true, ...resultado, filasInvalidas: invalidas });
+  } catch (error) {
+    logger.error("Error al cargar población por RUPS", error);
     throw error;
   }
 };

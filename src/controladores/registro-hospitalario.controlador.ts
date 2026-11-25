@@ -9,6 +9,7 @@ import { seguimientoServicio } from "../servicios/seguimiento.servicio";
 import { obtenerTablaDetalleAt2 } from "../servicios/at2-detalle-fuente.servicio";
 import { CONDICION_DETALLE_C_US } from "../utilidades/sql-joins.util";
 import {
+  sincronizarTotalMenores5,
   sincronizarTotalPacientesAtendidos,
   validarConsistenciaAt2r,
   type RegistroAt2Normalizado
@@ -293,6 +294,7 @@ export const guardarRegistroControlador = async (
     }
 
     sincronizarTotalPacientesAtendidos(registrosNormalizados);
+    sincronizarTotalMenores5(registrosNormalizados, conceptoMaxActual);
     const errorConsistencia = validarConsistenciaAt2r(registrosNormalizados, conceptoMaxActual);
     if (errorConsistencia) {
       return reply.status(400).send({
