@@ -6,11 +6,23 @@ import { obtenerTablaDetalleAt2 } from "./at2-detalle-fuente.servicio";
 import { REGION_CODE_TO_NAME } from "../utilidades/alcance-regional.util";
 import {
   asegurarTablaAtributosEstablecimiento,
-  condicionNoExento
+  condicionDosServicios,
+  condicionNoExento,
+  condicionServicioGeneral,
+  NIVELES_HOSPITAL,
+  TABLA_ATRIBUTOS_ESTABLECIMIENTO
 } from "./establecimiento-atributos.servicio";
 
 const TABLA_SEGUIMIENTO = "AT2_SEGUIMIENTO_ENVIO";
-const NIVELES_HOSPITAL = [1, 2, 3];
+
+/**
+ * En la sincronización desde el detalle se usa un LEFT JOIN a los atributos
+ * (alias attr_srv) en vez de EXISTS, para que la expresión del GROUP BY sea simple.
+ */
+const JOIN_ATRIBUTOS_SERVICIO = `
+        LEFT JOIN ${TABLA_ATRIBUTOS_ESTABLECIMIENTO} attr_srv
+          ON attr_srv.rups = CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci`;
+const EXPR_DOS_SERVICIOS_SYNC = `(COALESCE(us.C_NIVEL_US, 0) IN (${NIVELES_HOSPITAL.join(",")}) OR COALESCE(attr_srv.habilita_emergencia, 0) = 1)`;
 const ESTADOS_VALIDOS = new Set(["no_enviado", "enviado", "revisado"]);
 const SINCRONIZACION_TTL_MS = 5 * 60 * 1000;
 
@@ -92,6 +104,14 @@ const sincronizacionesRecientes = new Map<string, number>();
 const sincronizacionesPendientes = new Map<string, Promise<void>>();
 
 const obtenerExecutor = (executor?: QueryExecutor) => executor ?? obtenerPoolActual();
+
+/**
+ * Olvida las sincronizaciones recientes para que la próxima consulta vuelva a
+ * clasificar los envíos (por ejemplo, al habilitar emergencia en un establecimiento).
+ */
+export const reiniciarSincronizacionSeguimiento = () => {
+  sincronizacionesRecientes.clear();
+};
 
 const ejecutarSincronizacionConCache = async (clave: string, ejecutar: () => Promise<void>) => {
   const ahora = Date.now();
@@ -187,7 +207,7 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
-      AND (us.C_NIVEL_US NOT IN (${NIVELES_HOSPITAL.join(",")}) OR us.C_NIVEL_US IS NULL)
+      AND ${condicionServicioGeneral("us")}
       AND ${condicionNoExento("us")}
 
     UNION ALL
@@ -204,7 +224,7 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
-      AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+      AND ${condicionDosServicios("us")}
       AND ${condicionNoExento("us")}
 
     UNION ALL
@@ -221,7 +241,7 @@ const CTE_BASE_ESTABLECIMIENTOS = `
       ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
       AND muni.C_MUNICIPIO = us.C_MUNICIPIO
     WHERE us.C_REGION BETWEEN 1 AND 20
-      AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+      AND ${condicionDosServicios("us")}
       AND ${condicionNoExento("us")}
   )
 `;
@@ -371,7 +391,7 @@ export class SeguimientoServicio {
               us.C_REGION AS region_codigo,
               CAST(det.C_US AS CHAR) AS establecimiento_rups,
               CASE
-                WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+                WHEN ${EXPR_DOS_SERVICIOS_SYNC}
                   THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
                 ELSE 'general'
               END AS servicio,
@@ -383,7 +403,7 @@ export class SeguimientoServicio {
               NULL AS observaciones
             FROM ${tablaDetalle} det FORCE INDEX (idx_anio_mes)
             INNER JOIN BAS_BDR_US us
-              ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(det.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+              ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(det.C_US AS CHAR) COLLATE utf8mb4_unicode_ci${JOIN_ATRIBUTOS_SERVICIO}
             WHERE det.N_ANIO = ?
               AND det.N_MES = ?
               AND us.C_REGION BETWEEN 1 AND 20
@@ -391,7 +411,7 @@ export class SeguimientoServicio {
               us.C_REGION,
               CAST(det.C_US AS CHAR),
               CASE
-                WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+                WHEN ${EXPR_DOS_SERVICIOS_SYNC}
                   THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
                 ELSE 'general'
               END
@@ -443,7 +463,7 @@ export class SeguimientoServicio {
           us.C_REGION AS region_codigo,
           CAST(det.C_US AS CHAR) AS establecimiento_rups,
           CASE
-            WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+            WHEN ${EXPR_DOS_SERVICIOS_SYNC}
               THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
             ELSE 'general'
           END AS servicio,
@@ -455,7 +475,7 @@ export class SeguimientoServicio {
           NULL AS observaciones
         FROM ${tablaDetalle} det FORCE INDEX (idx_anio_mes)
         INNER JOIN BAS_BDR_US us
-          ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(det.C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+          ON CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci = CAST(det.C_US AS CHAR) COLLATE utf8mb4_unicode_ci${JOIN_ATRIBUTOS_SERVICIO}
         WHERE det.N_ANIO = ?
           AND det.N_MES BETWEEN 1 AND 12
           AND us.C_REGION BETWEEN 1 AND 20
@@ -464,7 +484,7 @@ export class SeguimientoServicio {
           us.C_REGION,
           CAST(det.C_US AS CHAR),
           CASE
-            WHEN us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+            WHEN ${EXPR_DOS_SERVICIOS_SYNC}
               THEN CASE WHEN det.C_SERVICIO = '2' THEN 'emergencia' ELSE 'consulta_externa' END
             ELSE 'general'
           END
@@ -615,7 +635,7 @@ export class SeguimientoServicio {
             ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
             AND muni.C_MUNICIPIO = us.C_MUNICIPIO
           WHERE us.C_REGION = ?
-            AND (us.C_NIVEL_US NOT IN (${NIVELES_HOSPITAL.join(",")}) OR us.C_NIVEL_US IS NULL)
+            AND ${condicionServicioGeneral("us")}
             AND ${condicionNoExento("us")}
 
           UNION ALL
@@ -632,7 +652,7 @@ export class SeguimientoServicio {
             ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
             AND muni.C_MUNICIPIO = us.C_MUNICIPIO
           WHERE us.C_REGION = ?
-            AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+            AND ${condicionDosServicios("us")}
             AND ${condicionNoExento("us")}
 
           UNION ALL
@@ -649,7 +669,7 @@ export class SeguimientoServicio {
             ON muni.C_DEPARTAMENTO = us.C_DEPARTAMENTO
             AND muni.C_MUNICIPIO = us.C_MUNICIPIO
           WHERE us.C_REGION = ?
-            AND us.C_NIVEL_US IN (${NIVELES_HOSPITAL.join(",")})
+            AND ${condicionDosServicios("us")}
             AND ${condicionNoExento("us")}
         )
         SELECT

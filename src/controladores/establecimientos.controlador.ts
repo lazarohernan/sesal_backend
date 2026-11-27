@@ -1,6 +1,7 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { establecimientosServicio } from "../servicios/establecimientos.servicio";
 import { establecimientoAtributosServicio } from "../servicios/establecimiento-atributos.servicio";
+import { reiniciarSincronizacionSeguimiento } from "../servicios/seguimiento.servicio";
 import { cache } from "../utilidades/cache.utilidad";
 import { logger } from "../utilidades/registro.utilidad";
 
@@ -144,20 +145,23 @@ const leerPoblacion = (valor: unknown): number | null | undefined => {
 export const actualizarAtributosControlador = async (
   request: FastifyRequest<{
     Params: { id?: string };
-    Body: { poblacion?: unknown; exentoReporte?: unknown; motivoExencion?: unknown };
+    Body: { poblacion?: unknown; exentoReporte?: unknown; motivoExencion?: unknown; habilitaEmergencia?: unknown };
   }>,
   reply: FastifyReply
 ) => {
   const id = Number(request.params.id);
   if (!id) return responderError(reply, 400, "ID_INVALIDO", "ID de establecimiento inválido.");
 
-  const { poblacion, exentoReporte, motivoExencion } = request.body ?? {};
+  const { poblacion, exentoReporte, motivoExencion, habilitaEmergencia } = request.body ?? {};
   const poblacionValida = leerPoblacion(poblacion);
   if (poblacion !== undefined && poblacionValida === undefined) {
     return responderError(reply, 400, "POBLACION_INVALIDA", "La población debe ser un número entero positivo.");
   }
   if (exentoReporte !== undefined && typeof exentoReporte !== "boolean") {
     return responderError(reply, 400, "EXENTO_INVALIDO", "exentoReporte debe ser verdadero o falso.");
+  }
+  if (habilitaEmergencia !== undefined && typeof habilitaEmergencia !== "boolean") {
+    return responderError(reply, 400, "EMERGENCIA_INVALIDA", "habilitaEmergencia debe ser verdadero o falso.");
   }
 
   try {
@@ -169,9 +173,16 @@ export const actualizarAtributosControlador = async (
       poblacion: poblacionValida,
       exentoReporte: exentoReporte as boolean | undefined,
       motivoExencion: motivoExencion === undefined ? undefined : String(motivoExencion ?? ""),
+      habilitaEmergencia: habilitaEmergencia as boolean | undefined,
       actualizadoPor: nombreUsuario(request)
     });
-    if (exentoReporte !== undefined) invalidarCacheSeguimiento();
+    // El seguimiento cambia si cambia quién está exento o quién llena emergencia.
+    if (exentoReporte !== undefined || habilitaEmergencia !== undefined) invalidarCacheSeguimiento();
+    if (habilitaEmergencia !== undefined) {
+      // Registro lee "dosServicios" de la lista de establecimientos del pivot.
+      cache.deleteByPrefix("pivot:dimension:ESTABLECIMIENTO");
+      reiniciarSincronizacionSeguimiento();
+    }
 
     const establecimiento = await establecimientosServicio.obtenerPorId(id);
     return reply.send({ ok: true, mensaje: "Datos del establecimiento actualizados.", establecimiento });
