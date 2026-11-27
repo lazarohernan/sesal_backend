@@ -4,7 +4,8 @@ import { obtenerPoolActual } from "../base_datos/pool";
 
 /**
  * Datos propios del sistema por establecimiento que no existen en el catálogo
- * BAS_BDR_US: población asignada y si está exento de reportar AT2R.
+ * BAS_BDR_US: población asignada, si está exento de reportar AT2R y si llena
+ * el formulario de emergencia aunque no sea hospital.
  * Se guardan aparte para no tocar las tablas del catálogo histórico.
  */
 export const TABLA_ATRIBUTOS_ESTABLECIMIENTO = "app_establecimiento_atributos";
@@ -20,11 +21,39 @@ export const condicionNoExento = (alias = "us") => `
       AND attr_exento.exento_reporte = 1
   )`;
 
+/** Niveles de BAS_BDR_US que son hospitales (HB=1, HG=2, HESP=3). */
+export const NIVELES_HOSPITAL = [1, 2, 3];
+
+/**
+ * Condición SQL: el establecimiento llena dos formularios AT2R (consulta externa
+ * y emergencia). Aplica a los hospitales y a los establecimientos habilitados
+ * desde el catálogo (por ejemplo, centros de las islas con turnos de emergencia).
+ * `alias` es el alias de BAS_BDR_US en la consulta; si se omite se usan las
+ * columnas sin prefijo (para CTEs que ya exponen C_US y C_NIVEL_US).
+ */
+export const condicionDosServicios = (alias: string | null = "us") => {
+  const pref = alias ? `${alias}.` : "";
+  return `(
+    COALESCE(${pref}C_NIVEL_US, 0) IN (${NIVELES_HOSPITAL.join(",")})
+    OR EXISTS (
+      SELECT 1 FROM ${TABLA_ATRIBUTOS_ESTABLECIMIENTO} attr_emerg
+      WHERE attr_emerg.rups = CAST(${pref}C_US AS CHAR) COLLATE utf8mb4_unicode_ci
+        AND attr_emerg.habilita_emergencia = 1
+    )
+  )`;
+};
+
+/** Negación de `condicionDosServicios`: establecimientos con formulario general. */
+export const condicionServicioGeneral = (alias: string | null = "us") =>
+  `NOT ${condicionDosServicios(alias)}`;
+
 export interface AtributosEstablecimiento {
   rups: string;
   poblacion: number | null;
   exentoReporte: boolean;
   motivoExencion: string | null;
+  /** Llena también el formulario de emergencia aunque no sea hospital. */
+  habilitaEmergencia: boolean;
   actualizadoPor: string | null;
   actualizadoEn: string | null;
 }
@@ -34,6 +63,7 @@ interface AtributosRow extends RowDataPacket {
   poblacion: number | null;
   exento_reporte: number;
   motivo_exencion: string | null;
+  habilita_emergencia: number | null;
   actualizado_por: string | null;
   actualizado_en: Date | string | null;
 }
@@ -49,12 +79,26 @@ export const asegurarTablaAtributosEstablecimiento = async (executor?: Pool | Po
       poblacion INT UNSIGNED NULL,
       exento_reporte TINYINT(1) NOT NULL DEFAULT 0,
       motivo_exencion VARCHAR(255) NULL,
+      habilita_emergencia TINYINT(1) NOT NULL DEFAULT 0,
       actualizado_por VARCHAR(160) NULL,
       actualizado_en DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       PRIMARY KEY (rups),
       KEY idx_exento (exento_reporte)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+  // Tablas creadas antes de este campo: agregarlo (cambio aditivo, default 0).
+  const [columnas] = await db.query<RowDataPacket[]>(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'habilita_emergencia'
+     LIMIT 1`,
+    [TABLA_ATRIBUTOS_ESTABLECIMIENTO]
+  );
+  if (!columnas.length) {
+    await db.query(
+      `ALTER TABLE ${TABLA_ATRIBUTOS_ESTABLECIMIENTO}
+       ADD COLUMN habilita_emergencia TINYINT(1) NOT NULL DEFAULT 0 AFTER motivo_exencion`
+    );
+  }
   tablaAsegurada = true;
 };
 
@@ -63,6 +107,7 @@ const mapear = (row: AtributosRow): AtributosEstablecimiento => ({
   poblacion: row.poblacion === null || row.poblacion === undefined ? null : Number(row.poblacion),
   exentoReporte: Number(row.exento_reporte) === 1,
   motivoExencion: row.motivo_exencion ?? null,
+  habilitaEmergencia: Number(row.habilita_emergencia ?? 0) === 1,
   actualizadoPor: row.actualizado_por ?? null,
   actualizadoEn: row.actualizado_en ? new Date(row.actualizado_en).toISOString() : null
 });
@@ -81,6 +126,7 @@ export const establecimientoAtributosServicio = {
     poblacion?: number | null;
     exentoReporte?: boolean;
     motivoExencion?: string | null;
+    habilitaEmergencia?: boolean;
     actualizadoPor: string;
   }): Promise<void> {
     await asegurarTablaAtributosEstablecimiento();
@@ -97,6 +143,10 @@ export const establecimientoAtributosServicio = {
     if (input.motivoExencion !== undefined) {
       campos.push("motivo_exencion");
       valores.push(input.motivoExencion?.trim() ? input.motivoExencion.trim().slice(0, 255) : null);
+    }
+    if (input.habilitaEmergencia !== undefined) {
+      campos.push("habilita_emergencia");
+      valores.push(input.habilitaEmergencia ? 1 : 0);
     }
     if (!campos.length) return;
     campos.push("actualizado_por");

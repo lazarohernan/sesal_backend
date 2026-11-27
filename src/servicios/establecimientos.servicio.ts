@@ -21,6 +21,8 @@ export interface Establecimiento {
   /** Exento de reportar AT2R: no cuenta en el total esperado del seguimiento. */
   exentoReporte: boolean;
   motivoExencion: string | null;
+  /** Llena también el formulario de emergencia aunque no sea hospital. */
+  habilitaEmergencia: boolean;
 }
 
 /**
@@ -111,6 +113,7 @@ const mapearEstablecimiento = (
   poblacion: atributos?.poblacion ?? null,
   exentoReporte: atributos?.exentoReporte ?? false,
   motivoExencion: atributos?.motivoExencion ?? null,
+  habilitaEmergencia: atributos?.habilitaEmergencia ?? false,
 });
 
 const BASE_QUERY = `

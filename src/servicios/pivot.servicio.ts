@@ -14,6 +14,10 @@ import {
   obtenerTablaDetalleAt2
 } from "./at2-detalle-fuente.servicio";
 import { consultarSql } from "../utilidades/mysql-consulta.utilidad";
+import {
+  asegurarTablaAtributosEstablecimiento,
+  condicionDosServicios
+} from "./establecimiento-atributos.servicio";
 import { ordenarValoresColumnaPivot } from "../utilidades/pivot-orden.util";
 import {
   JOIN_CAT_ESTABLECIMIENTO,
@@ -1019,6 +1023,7 @@ const obtenerEstablecimientosPorMunicipio = async (
   regionCodigo?: number | null;
   regionNombre?: string | null;
   activo?: boolean;
+  dosServicios?: boolean;
 }>> => {
   const condiciones: string[] = [];
   const parametros: Array<string | number> = [];
@@ -1085,7 +1090,8 @@ const obtenerEstablecimientosPorMunicipio = async (
         WHEN UPPER(COALESCE(us.B_ACTIVA, 'S')) IN ('S', '1', 'SI', 'TRUE', 'T', 'Y', 'YES')
           THEN 1
         ELSE 0
-      END AS activo
+      END AS activo,
+      CASE WHEN ${condicionDosServicios("us")} THEN 1 ELSE 0 END AS dosServicios
     -- Se parte de BAS_BDR_US para no perder establecimientos que aún no están
     -- en cat_establecimientos (p. ej. los creados desde el panel admin).
     FROM BAS_BDR_US us
@@ -1104,6 +1110,7 @@ const obtenerEstablecimientosPorMunicipio = async (
   `;
   parametros.push(limiteFinal);
 
+  await asegurarTablaAtributosEstablecimiento();
   const [rows] = await pool.query<RowDataPacket[]>(sql, parametros);
   return rows.map((row: RowDataPacket) => ({
     valor: row.valor,
@@ -1114,7 +1121,8 @@ const obtenerEstablecimientosPorMunicipio = async (
     municipio: row.municipio,
     regionCodigo: row.regionCodigo === null || row.regionCodigo === undefined ? null : Number(row.regionCodigo),
     regionNombre: row.regionNombre,
-    activo: Boolean(Number(row.activo ?? 1))
+    activo: Boolean(Number(row.activo ?? 1)),
+    dosServicios: Number(row.dosServicios ?? 0) === 1
   }));
 };
 
@@ -1135,6 +1143,7 @@ const obtenerEstablecimientosPorRegion = async (
   regionCodigo?: number | null;
   regionNombre?: string | null;
   activo?: boolean;
+  dosServicios?: boolean;
 }>> => {
   const condiciones: string[] = [];
   const parametros: Array<string | number> = [];
@@ -1188,7 +1197,8 @@ const obtenerEstablecimientosPorRegion = async (
         WHEN UPPER(COALESCE(us.B_ACTIVA, 'S')) IN ('S', '1', 'SI', 'TRUE', 'T', 'Y', 'YES')
           THEN 1
         ELSE 0
-      END AS activo
+      END AS activo,
+      CASE WHEN ${condicionDosServicios("us")} THEN 1 ELSE 0 END AS dosServicios
     -- Se parte de BAS_BDR_US para no perder establecimientos que aún no están
     -- en cat_establecimientos (p. ej. los creados desde el panel admin).
     FROM BAS_BDR_US us
@@ -1207,6 +1217,7 @@ const obtenerEstablecimientosPorRegion = async (
   `;
   parametros.push(limiteFinal);
 
+  await asegurarTablaAtributosEstablecimiento();
   const [rows] = await pool.query<RowDataPacket[]>(sql, parametros);
   return rows.map((row: RowDataPacket) => ({
     valor: row.valor,
@@ -1217,7 +1228,8 @@ const obtenerEstablecimientosPorRegion = async (
     municipio: row.municipio,
     regionCodigo: row.regionCodigo === null || row.regionCodigo === undefined ? null : Number(row.regionCodigo),
     regionNombre: row.regionNombre,
-    activo: Boolean(Number(row.activo ?? 1))
+    activo: Boolean(Number(row.activo ?? 1)),
+    dosServicios: Number(row.dosServicios ?? 0) === 1
   }));
 };
 

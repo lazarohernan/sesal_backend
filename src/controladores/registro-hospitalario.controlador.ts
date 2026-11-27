@@ -9,6 +9,10 @@ import { seguimientoServicio } from "../servicios/seguimiento.servicio";
 import { obtenerTablaDetalleAt2 } from "../servicios/at2-detalle-fuente.servicio";
 import { CONDICION_DETALLE_C_US } from "../utilidades/sql-joins.util";
 import {
+  asegurarTablaAtributosEstablecimiento,
+  condicionDosServicios
+} from "../servicios/establecimiento-atributos.servicio";
+import {
   sincronizarTotalMenores5,
   sincronizarTotalPacientesAtendidos,
   validarConsistenciaAt2r,
@@ -66,13 +70,16 @@ const sanitizarServicio = (valor: unknown): 'consulta_externa' | 'emergencia' | 
   return SERVICIOS_VALIDOS.has(texto) ? (texto as 'consulta_externa' | 'emergencia') : null;
 };
 
-// Niveles de establecimiento que corresponden a hospitales (HB=1, HG=2, HESP=3)
-const NIVELES_HOSPITAL = [1, 2, 3];
-
+/**
+ * Indica si el establecimiento llena dos formularios (consulta externa y
+ * emergencia): hospitales (HB, HG, HESP) o establecimientos habilitados para
+ * emergencia en el catálogo. Los demás llenan solo el formulario general.
+ */
 const esCodigoHospital = async (rups: string): Promise<boolean> => {
+  await asegurarTablaAtributosEstablecimiento();
   const pool = obtenerPoolActual();
   const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT 1 FROM BAS_BDR_US WHERE C_US = CAST(? AS UNSIGNED) AND C_NIVEL_US IN (${NIVELES_HOSPITAL.join(',')}) LIMIT 1`,
+    `SELECT 1 FROM BAS_BDR_US us WHERE us.C_US = CAST(? AS UNSIGNED) AND ${condicionDosServicios("us")} LIMIT 1`,
     [rups]
   );
   return rows.length > 0;
@@ -211,7 +218,7 @@ export const guardarRegistroControlador = async (
     if (esHospital && !servicioVal) {
       return reply.status(400).send({
         codigo: "PARAMETRO_INVALIDO",
-        mensaje: "Este establecimiento es un hospital. Debe indicar el servicio: 'consulta_externa' o 'emergencia'."
+        mensaje: "Este establecimiento registra consulta externa y emergencia. Debe indicar el servicio: 'consulta_externa' o 'emergencia'."
       });
     }
 
@@ -484,7 +491,7 @@ export const eliminarRegistroControlador = async (
     if (esHospital && !servicioVal) {
       return reply.status(400).send({
         codigo: "PARAMETRO_INVALIDO",
-        mensaje: "Este establecimiento es un hospital. Debe indicar el servicio que desea eliminar."
+        mensaje: "Este establecimiento registra consulta externa y emergencia. Debe indicar el servicio que desea eliminar."
       });
     }
 

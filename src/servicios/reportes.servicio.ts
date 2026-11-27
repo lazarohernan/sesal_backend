@@ -10,6 +10,7 @@ import { seguimientoServicio, type EstadoSeguimiento } from "./seguimiento.servi
 import { CODIGO_CONCEPTO_TOTAL_PACIENTES_ATENDIDOS } from "../utilidades/at2-reglas.util";
 import {
   asegurarTablaAtributosEstablecimiento,
+  condicionDosServicios,
   condicionNoExento
 } from "./establecimiento-atributos.servicio";
 import { construirCatalogoAt2NuevoSql } from "../utilidades/at2-catalogo.util";
@@ -477,7 +478,8 @@ export const obtenerControlEnviosAt2 = async (params: {
           CAST(us.C_US AS CHAR) COLLATE utf8mb4_unicode_ci AS establecimiento_rups,
           TRIM(CAST(us.D_US AS CHAR)) COLLATE utf8mb4_unicode_ci AS establecimiento_nombre,
           COALESCE(CAST(nivel.D_NIVEL_US_SIGLA AS CHAR), CAST(us.C_NIVEL_US AS CHAR), 'S/N') COLLATE utf8mb4_unicode_ci AS nivel_sigla,
-          us.C_NIVEL_US
+          -- Hospitales y establecimientos habilitados para emergencia llenan dos formularios.
+          CASE WHEN ${condicionDosServicios("us")} THEN 1 ELSE 0 END AS dos_servicios
         FROM BAS_BDR_US us
         LEFT JOIN BAS_BDR_DEPARTAMENTOS dep
           ON dep.C_DEPARTAMENTO = us.C_DEPARTAMENTO
@@ -500,7 +502,7 @@ export const obtenerControlEnviosAt2 = async (params: {
           'general' COLLATE utf8mb4_unicode_ci AS servicio,
           establecimiento_nombre COLLATE utf8mb4_unicode_ci AS unidad_reporte
         FROM base_unidades
-        WHERE C_NIVEL_US NOT IN (1, 2, 3) OR C_NIVEL_US IS NULL
+        WHERE dos_servicios = 0
 
         UNION ALL
 
@@ -514,7 +516,7 @@ export const obtenerControlEnviosAt2 = async (params: {
           'consulta_externa' COLLATE utf8mb4_unicode_ci AS servicio,
           CONCAT(establecimiento_nombre, ' - Consulta externa') COLLATE utf8mb4_unicode_ci AS unidad_reporte
         FROM base_unidades
-        WHERE C_NIVEL_US IN (1, 2, 3)
+        WHERE dos_servicios = 1
 
         UNION ALL
 
@@ -528,7 +530,7 @@ export const obtenerControlEnviosAt2 = async (params: {
           'emergencia' COLLATE utf8mb4_unicode_ci AS servicio,
           CONCAT(establecimiento_nombre, ' - Emergencia') COLLATE utf8mb4_unicode_ci AS unidad_reporte
         FROM base_unidades
-        WHERE C_NIVEL_US IN (1, 2, 3)
+        WHERE dos_servicios = 1
       )
       SELECT
         base.region_codigo,
