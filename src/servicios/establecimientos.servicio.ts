@@ -25,6 +25,21 @@ export interface Establecimiento {
   habilitaEmergencia: boolean;
 }
 
+/**
+ * Mantiene cat_establecimientos alineado con BAS_BDR_US. Varias consultas
+ * (pivot, reportes, registro) toman el nombre del establecimiento de ese
+ * catálogo, así que todo alta o cambio de nombre debe reflejarse ahí.
+ */
+const sincronizarCatalogo = async (codigo: number, nombre: string): Promise<void> => {
+  const pool = obtenerPoolActual();
+  await pool.query<ResultSetHeader>(
+    `INSERT INTO cat_establecimientos (codigo, nombre)
+     VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE nombre = VALUES(nombre)`,
+    [String(codigo), nombre]
+  );
+};
+
 export interface NivelEstablecimiento {
   codigo: number;
   descripcion: string;
@@ -215,6 +230,8 @@ export const establecimientosServicio = {
       ]
     );
 
+    await sincronizarCatalogo(Number(input.codigoRup), input.nombre.trim());
+
     const creado = await this.obtenerPorId(Number(input.codigoRup));
     if (!creado) throw new Error("No se pudo recuperar el establecimiento creado.");
     return creado;
@@ -248,6 +265,7 @@ export const establecimientosServicio = {
 
     const actualizado = await this.obtenerPorId(input.id);
     if (!actualizado) throw new Error("Establecimiento no encontrado.");
+    await sincronizarCatalogo(input.id, input.nombre.trim());
     return actualizado;
   },
 };
